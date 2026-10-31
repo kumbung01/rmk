@@ -49,8 +49,9 @@
 //! is informational: a new `Cmd` or a new/extended topic is a `minor` bump (old
 //! peers answer `UnknownCmd` or ignore trailing topic bytes), while reshaping an
 //! existing request/response — *including appending a field* — is a `major` bump,
-//! since hosts reject trailing response bytes. The `snapshots/*.snap` golden
-//! files (`tests.rs`) fail on any accidental drift.
+//! since hosts reject trailing response bytes. While `major` is 0 the protocol
+//! is unstable: any change bumps `minor`, and hosts require an exact match.
+//! The `snapshots/*.snap` golden files (`tests.rs`) fail on any accidental drift.
 
 pub mod command;
 
@@ -83,8 +84,8 @@ pub const RYNK_INPUT_CHAR_UUID: u128 = 0x80f9319b_0c74_43a5_9738_c59d6dda3db9;
 /// Rynk `output_data` characteristic UUID.
 pub const RYNK_OUTPUT_CHAR_UUID: u128 = 0x19802524_6f90_4346_93c2_63dbc509ab55;
 
-/// Informational marker the `rynk` firmware prepends to its USB serial number.
-/// Host discovery keys on the vendor interface triple below, not on this.
+/// Serial number prefix for Rynk keyboards and dongles without Vial.
+/// USB discovery uses the vendor interface below.
 pub const RYNK_MAGIC: &str = "rynk:";
 
 /// Class of the Rynk vendor-specific USB bulk interface.

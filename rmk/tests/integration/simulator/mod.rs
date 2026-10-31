@@ -8,8 +8,10 @@
 //! Lives in the test crate, so it drives only rmk's public API (plus the
 //! `#[doc(hidden)]` `rmk::test_support` gate for a few internal signals).
 
+/// Geometry of the simulated flash part: 4 KiB in 1 KiB sectors, a sector
+/// holding every chunk of the macro buffer, written 4 bytes at a time.
 #[cfg(feature = "storage")]
-pub mod flash;
+pub type Flash = rmk::test_support::InMemoryFlash<4096, 1024, 4>;
 
 use core::future::Future;
 use core::pin::Pin;
@@ -33,7 +35,7 @@ use rmk::config::RmkConfig;
 use rmk::config::StorageConfig;
 use rmk::config::{BehaviorConfig, Hand, PositionalConfig};
 use rmk::core_traits::Runnable;
-use rmk::event::{AsyncEventPublisher, AsyncPublishableEvent, KeyboardEvent, KeyboardEventPos};
+use rmk::event::{AsyncEventPublisher, AsyncPublishableEvent, KeyboardEvent, KeyboardEventSource};
 use rmk::hid::{KeyboardReport, Report};
 use rmk::input_device::rotary_encoder::Direction;
 use rmk::keyboard::Keyboard;
@@ -177,8 +179,6 @@ enum SimStep {
     /// future — so the harness needs no vocabulary of its own for event types.
     #[cfg(feature = "rynk")]
     Publish(Pin<Box<dyn Future<Output = ()>>>),
-    #[cfg(feature = "storage")]
-    WaitStorage,
     #[cfg(feature = "passkey_entry")]
     BeginPasskeyEntry,
     #[cfg(feature = "passkey_entry")]
@@ -317,12 +317,6 @@ impl SimKeyboard {
         self
     }
 
-    #[cfg(feature = "storage")]
-    pub fn wait_storage(&mut self) -> &mut Self {
-        self.steps.push(SimStep::WaitStorage);
-        self
-    }
-
     #[cfg(feature = "passkey_entry")]
     pub fn begin_passkey_entry(&mut self) -> &mut Self {
         self.steps.push(SimStep::BeginPasskeyEntry);
@@ -359,17 +353,17 @@ impl SimKeyboard {
             )
         });
 
-        // Nothing else drains `FLASH_CHANNEL`, so without a storage task the
+        // Nothing else drains the storage queue, so without a storage task the
         // keyboard would block on it once full.
         let flash = async {
             match storage {
                 Some(storage) => storage.await,
-                None => rmk::channel::drain_flash_channel_for_test().await,
+                None => rmk::test_support::drain_flash_channel().await,
             }
         };
         // Same for the BLE profile task, but keep what it received so tests can check it.
         let mut profile_actions = Vec::new();
-        let profiles = rmk::channel::drain_ble_profile_channel_for_test(&mut profile_actions);
+        let profiles = rmk::test_support::drain_ble_profile_channel(&mut profile_actions);
 
         // A host connection is just a byte stream: drive the production
         // `run_session` over an in-memory duplex, exactly as a USB/BLE transport
@@ -415,7 +409,7 @@ impl SimKeyboard {
 /// the host end of the link the caller's session runs on.
 async fn run_steps(steps: Vec<SimStep>, to_device: &Link, from_device: &Link) {
     let sender = KeyboardEvent::publisher_async().expect("free publisher slot for the scenario driver");
-    let mut pressed_inputs = Vec::<KeyboardEventPos>::new();
+    let mut pressed_inputs = Vec::<KeyboardEventSource>::new();
     // Codegen queues one step per `expect` entry, in order, so the nth
     // expectation played is the scenario's `expect[n]`.
     let mut expects = 0usize;
@@ -426,18 +420,18 @@ async fn run_steps(steps: Vec<SimStep>, to_device: &Link, from_device: &Link) {
             SimStep::Event(event) => {
                 if event.pressed {
                     assert!(
-                        !pressed_inputs.contains(&event.pos),
+                        !pressed_inputs.contains(&event.source),
                         "input {} was pressed twice without a release",
-                        input(event.pos)
+                        input(event.source)
                     );
-                    pressed_inputs.push(event.pos);
+                    pressed_inputs.push(event.source);
                 } else {
-                    let Some(pos) = pressed_inputs.iter().position(|pressed| *pressed == event.pos) else {
-                        panic!("input {} was released without a matching press", input(event.pos));
+                    let Some(pos) = pressed_inputs.iter().position(|pressed| *pressed == event.source) else {
+                        panic!("input {} was released without a matching press", input(event.source));
                     };
                     pressed_inputs.swap_remove(pos);
                 }
-                let waiting = format!("publishing {} blocked for {TIMEOUT_SECS}s", input(event.pos));
+                let waiting = format!("publishing {} blocked for {TIMEOUT_SECS}s", input(event.source));
                 with_timeout(sender.publish_async(event), &waiting).await;
             }
             SimStep::Delay(duration) => Timer::after(duration).await,
@@ -511,12 +505,6 @@ async fn run_steps(steps: Vec<SimStep>, to_device: &Link, from_device: &Link) {
             }
             #[cfg(feature = "rynk")]
             SimStep::Publish(event) => event.await,
-            #[cfg(feature = "storage")]
-            SimStep::WaitStorage => {
-                let waiting = format!("no storage write within {TIMEOUT_SECS}s");
-                let written = with_timeout(rmk::test_support::flush_storage(), &waiting).await;
-                assert!(written, "storage write failed");
-            }
             #[cfg(feature = "passkey_entry")]
             SimStep::BeginPasskeyEntry => rmk::ble::passkey::begin_passkey_entry_session(),
             #[cfg(feature = "passkey_entry")]
@@ -633,10 +621,15 @@ fn summary(report: &Report) -> String {
 }
 
 /// An input position in the `[row, col]` vocabulary a scenario's steps write.
-fn input(pos: KeyboardEventPos) -> String {
+fn input(pos: KeyboardEventSource) -> String {
     match pos {
-        KeyboardEventPos::Key(key) => format!("key [{}, {}]", key.row, key.col),
-        KeyboardEventPos::RotaryEncoder(pos) => format!("encoder {} {:?}", pos.id, pos.direction),
+        KeyboardEventSource::Key(key) => format!("key [{}, {}]", key.row, key.col),
+        KeyboardEventSource::RotaryEncoder(pos) => format!("encoder {} {:?}", pos.id, pos.direction),
+        KeyboardEventSource::Touch(pos) => format!("touchpad {} {:?}", pos.id, pos.gesture),
+        KeyboardEventSource::Combo(idx) => format!("combo {idx}"),
+        KeyboardEventSource::Macro => "macro".to_string(),
+        KeyboardEventSource::Virtual(id) => format!("virtual {id}"),
+        KeyboardEventSource::KeyCode(keycode) => format!("keycode {keycode:?}"),
     }
 }
 

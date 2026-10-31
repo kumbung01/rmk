@@ -31,6 +31,21 @@ steps = [
 ]
 expect = [["E"], [], ["R"], [], ["T"], []]
 
+# A combo output is held under the combo's own identity, so it and a physical
+# key sharing its modifier release independently.
+[[test]]
+name = "combo_modifier_output_and_held_key_release_independently"
+steps = [
+  { press = [1, 1] },   # MT(B, LShift)
+  { delay = 300 },      # hold: LShift
+  { press = [2, 3] },   # V
+  { press = [2, 4] },   # B: V+B fires LShift
+  { release = [2, 3] },
+  { release = [2, 4] }, # combo releases its LShift
+  { release = [1, 1] },
+]
+expect = [["LShift"], ["LShift"], ["LShift"], []]
+
 [[test]]
 name = "combo_timeout_and_ignore"
 steps = [{ tap = { pos = [2, 3], duration = 100 } }]
@@ -427,3 +442,89 @@ steps = [
   { release = [1, 3] },  # the leftover W dispatches on its release
 ]
 expect = [["B"], [], ["W"], []]
+
+# A combo output that is itself a morse key lives in the held buffer under the
+# combo's position, which has no keymap entry: resolving it must use the action
+# the combo fired, not a keymap lookup.
+[[test]]
+name = "morse_combo_output_taps"
+behavior.combo = {
+  timeout = "100ms",
+  combos = [{ actions = ["V", "B"], output = "MT(B, LShift)", layer = 0 }],
+}
+steps = [
+  { press = [2, 3] },
+  { press = [2, 4] },
+  { delay = 30 },
+  { release = [2, 3] },
+  { release = [2, 4] },
+]
+expect = [["B"], []]
+
+[[test]]
+name = "morse_combo_output_holds"
+behavior.combo = {
+  timeout = "100ms",
+  combos = [{ actions = ["V", "B"], output = "MT(B, LShift)", layer = 0 }],
+}
+steps = [
+  { press = [2, 3] },
+  { press = [2, 4] },
+  { delay = 300 },
+  { release = [2, 3] },
+  { release = [2, 4] },
+]
+expect = [["LShift"], []]
+
+[[test]]
+name = "morse_combo_output_resolves_by_permissive_hold"
+behavior.morse = { permissive_hold = true }
+behavior.combo = {
+  timeout = "100ms",
+  combos = [{ actions = ["V", "B"], output = "MT(B, LShift)", layer = 0 }],
+}
+steps = [
+  { press = [2, 3] },
+  { press = [2, 4] },
+  { delay = 30 },
+  { tap = { pos = [2, 5], duration = 30 } },
+  { release = [2, 3] },
+  { release = [2, 4] },
+]
+expect = [["LShift"], ["LShift", "N"], ["LShift"], []]
+
+[[test]]
+name = "layer_tap_combo_output_taps"
+behavior.combo = {
+  timeout = "100ms",
+  combos = [{ actions = ["R", "T"], output = "LT(1, D)", layer = 0 }],
+}
+steps = [
+  { press = [1, 5] },
+  { press = [1, 6] },
+  { delay = 30 },
+  { release = [1, 5] },
+  { release = [1, 6] },
+]
+expect = [["D"], []]
+
+# A combo fired while a morse key is unresolved waits in the held buffer like
+# any other key, and fires as its own output once the morse key settles.
+[[test]]
+name = "combo_output_buffered_behind_morse_key_fires_after_hold"
+behavior.morse = { permissive_hold = true }
+behavior.combo = {
+  timeout = "100ms",
+  combos = [{ actions = ["E", "R"], output = "A", layer = 0 }],
+}
+steps = [
+  { press = [1, 1] },   # MT(B, LShift)
+  { delay = 20 },
+  { press = [1, 4] },
+  { press = [1, 5] },   # E+R fires A, buffered behind the morse key
+  { delay = 300 },      # hold: LShift, then A
+  { release = [1, 4] },
+  { release = [1, 5] },
+  { release = [1, 1] },
+]
+expect = [["LShift"], ["LShift", "A"], ["LShift"], []]

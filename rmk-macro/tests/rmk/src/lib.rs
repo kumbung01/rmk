@@ -8,6 +8,7 @@
 #![allow(async_fn_in_trait)]
 
 // Re-export futures for select_biased! macro usage
+pub use embassy_futures;
 pub use futures;
 
 /// Re-export select_biased! macro from futures crate
@@ -83,9 +84,18 @@ pub mod event {
         fn next_event(&mut self) -> impl core::future::Future<Output = Self::Event>;
     }
 
+    impl EventSubscriber for core::future::Pending<core::convert::Infallible> {
+        type Event = core::convert::Infallible;
+
+        async fn next_event(&mut self) -> Self::Event {
+            self.await
+        }
+    }
+
     /// Trait for events that can be published
     pub trait PublishableEvent: Clone {
         type Publisher: EventPublisher<Event = Self>;
+        const PUBLISH_IS_NOOP: bool;
         fn publisher() -> Self::Publisher;
     }
 
@@ -186,10 +196,35 @@ pub mod processor {
             }
         }
     }
+
+    /// Trait for processors driven by a dynamic deadline in addition to events
+    pub trait DeadlineProcessor: Processor {
+        /// The next moment `on_deadline` should fire, or `None` when nothing is armed
+        fn deadline(&self) -> Option<crate::embassy_time::Instant>;
+
+        /// Called when the deadline elapses without an intervening event
+        fn on_deadline(&mut self) -> impl core::future::Future<Output = ()>;
+
+        /// Loop that interleaves event processing with the deadline
+        async fn deadline_loop(&mut self) -> ! {
+            loop {
+                // Mock implementation - just loop forever
+            }
+        }
+
+        async fn polling_deadline_loop(&mut self) -> !
+        where
+            Self: PollingProcessor,
+        {
+            loop {}
+        }
+    }
 }
 
 /// Mock macros module for marker attributes
-pub mod macros {}
+pub mod macros {
+    pub use rmk_macro::runnable_generated;
+}
 
 /// Mock KeyMap struct for keyboard configuration
 pub struct KeyMap<

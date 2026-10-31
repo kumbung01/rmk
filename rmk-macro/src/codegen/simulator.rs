@@ -15,7 +15,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::codegen::action_parser::get_key_with_alias;
+use crate::codegen::action_parser::{expand_steno_key, get_key_with_alias};
 use crate::codegen::behavior::expand_behavior_config;
 use crate::codegen::keymap::{expand_encoder_layer, expand_layer};
 use proc_macro2::{Ident, TokenStream as TokenStream2};
@@ -250,6 +250,11 @@ fn expand_test(
         })
         .transpose()?;
     let builder = expand_builder(&keymap, &behavior, rmk_config);
+    let build = if features.iter().any(|f| f.as_str() == "storage") {
+        quote! { build_with_flash(crate::simulator::Flash::new()) }
+    } else {
+        quote! { build() }
+    };
     let fn_name = format_ident!("{}", test.name);
 
     Ok(quote! {
@@ -258,7 +263,7 @@ fn expand_test(
         fn #fn_name() {
             ::rmk::test_support::test_block_on(async {
                 #behavior_stmt
-                let mut keyboard = #builder .build().await;
+                let mut keyboard = #builder .#build.await;
                 keyboard #(#steps)* .run().await;
             });
         }
@@ -450,15 +455,15 @@ fn expectation(value: &Value) -> Result<TokenStream2, String> {
             #[serde(deny_unknown_fields, default)]
             struct Mouse {
                 buttons: u8,
-                x: i8,
-                y: i8,
-                wheel: i8,
-                pan: i8,
+                x: i16,
+                y: i16,
+                wheel: i16,
+                pan: i16,
             }
             let m: Mouse = arg(v, op, "{ buttons, x, y, wheel, pan }")?;
             let (buttons, x, y, wheel, pan) = (m.buttons, m.x, m.y, m.wheel, m.pan);
             quote! {
-                .expect_report(::rmk::hid::Report::MouseReport(::usbd_hid::descriptor::MouseReport {
+                .expect_report(::rmk::hid::Report::MouseReport(::rmk::hid::MouseReport {
                     buttons: #buttons,
                     x: #x,
                     y: #y,
@@ -503,17 +508,19 @@ fn expectation(value: &Value) -> Result<TokenStream2, String> {
         }
         "steno" => {
             let keys: Vec<String> = arg(v, op, "an array of steno key names")?;
-            // A `StenoKey` is a bit index into the 64-bit chord bitmap. The array
-            // is annotated so an empty chord still infers.
+            // The array is annotated so an empty chord still infers. The bitmap
+            // is rebuilt from chart indices rather than through `StenoChord`, so
+            // a wrong shift there fails these scenarios.
             let len = keys.len();
-            let keys = keys.iter().map(|k| format_ident!("{}", k.to_uppercase()));
+            let keys = keys.iter().map(|k| expand_steno_key(k));
             quote! {
                 .expect_report(::rmk::hid::Report::StenoReport({
                     let chord: [::rmk::types::steno::StenoKey; #len] =
                         [#(::rmk::types::steno::StenoKey::#keys),*];
                     let mut keys = [0u8; 8];
                     for key in chord {
-                        keys[(key.0 / 8) as usize] |= 0x80 >> (key.0 % 8);
+                        let idx = key.chart_index() as usize;
+                        keys[idx / 8] |= 0x80 >> (idx % 8);
                     }
                     ::rmk::hid::StenoReport { keys }
                 }))

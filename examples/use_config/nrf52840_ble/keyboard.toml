@@ -14,6 +14,9 @@ col_pins = ["P1_05", "P1_06", "P1_03", "P1_04"]
 # Default diode direction is col2row; set `row2col = true` if needed.
 # row2col = true
 
+[host]
+unlock_keys = [[0, 0], [0, 1]]
+
 [layout]
 rows = 5
 cols = 4
@@ -82,9 +85,11 @@ reverse = false
 
 [ble]
 enabled = true
-# vddh has an internal voltage divider
+
+[battery]
+# VDDH uses its internal voltage divider.
 battery_adc_pin = "vddh"
-# Or
+# For an external divider, replace the line above and set both resistor values:
 # battery_adc_pin = "P0_04"
 # adc_divider_measured = 2000
 # adc_divider_total = 2806

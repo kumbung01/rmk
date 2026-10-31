@@ -7,15 +7,15 @@ use embassy_sync::channel::{Channel, TrySendError};
 use embassy_sync::signal::Signal;
 pub use embassy_sync::{blocking_mutex, channel, pubsub, zerocopy_channel};
 use rmk_types::connection::ConnectionType;
+use usbd_hid::descriptor::{MediaKeyboardReport, SystemControlReport};
 #[cfg(feature = "_ble")]
 use {crate::ble::profile::BleProfileAction, rmk_types::led_indicator::LedIndicator};
 
 #[cfg(all(feature = "vial", feature = "_ble"))]
 use crate::VIAL_CHANNEL_SIZE;
-use crate::event::KeyboardEvent;
-use crate::hid::{KeyboardReport, Report};
-#[cfg(feature = "storage")]
-use crate::{FLASH_CHANNEL_SIZE, storage::FlashOperationMessage};
+#[cfg(feature = "steno")]
+use crate::hid::StenoReport;
+use crate::hid::{KeyboardReport, MouseReport, Report};
 use crate::{REPORT_CHANNEL_SIZE, RawMutex};
 
 type ReportChannel = Channel<RawMutex, Report, REPORT_CHANNEL_SIZE>;
@@ -68,60 +68,36 @@ pub(crate) async fn send_hid_report(mut report: Report) {
     }
 }
 
-/// Drops the report when the active transport's queue is full or no
-/// transport is selected. Use for producers where back-pressure would block
-/// the matrix scan (e.g. steno chord output).
+/// Never waits for queue space, so a steno send cannot stall the keyboard
+/// task. A dropped report can lose or merge a stroke on the host; the next
+/// report still restates every held key because steno reports are absolute.
 pub(crate) fn try_send_hid_report(report: Report) {
     if let Some((_, ch)) = active_report_channel() {
         let _ = ch.try_send(report);
     }
 }
 
-/// Drains queued reports for `transport` and leaves an all-up keyboard report
-/// for its writer. Called on active-transport flips so the previous host
-/// releases any pressed keys without replaying stale queued reports later.
+/// Drains queued reports for `transport` and leaves an all-up report of every
+/// type for its writer. Called on active-transport flips so the previous host
+/// releases any pressed keys and buttons without replaying stale queued reports later.
 pub(crate) fn clear_and_release_report_channel(transport: ConnectionType) {
     if let Some(ch) = report_channel(transport) {
         ch.clear();
-        let _ = ch.try_send(Report::KeyboardReport(KeyboardReport::default()));
+        for report in [
+            Report::KeyboardReport(KeyboardReport::default()),
+            Report::MouseReport(MouseReport::default()),
+            Report::MediaKeyboardReport(MediaKeyboardReport { usage_id: 0 }),
+            Report::SystemControlReport(SystemControlReport { usage_id: 0 }),
+            #[cfg(feature = "steno")]
+            Report::StenoReport(StenoReport::default()),
+        ] {
+            let _ = ch.try_send(report);
+        }
     }
 }
 
-// Sync messages from server to flash
-#[cfg(feature = "storage")]
-pub(crate) static FLASH_CHANNEL: Channel<RawMutex, FlashOperationMessage, FLASH_CHANNEL_SIZE> = Channel::new();
-
-/// Test-only: continuously drain [`FLASH_CHANNEL`] so host-service integration
-/// tests that trigger persistence never block on a full, never-serviced flash
-/// queue — the real firmware's storage task is what normally drains it.
-#[cfg(feature = "std")]
-#[doc(hidden)]
-pub async fn drain_flash_channel_for_test() {
-    #[cfg(feature = "storage")]
-    loop {
-        FLASH_CHANNEL.receive().await;
-    }
-    #[cfg(not(feature = "storage"))]
-    core::future::pending::<()>().await
-}
 #[cfg(feature = "_ble")]
 pub(crate) static BLE_PROFILE_CHANNEL: Channel<RawMutex, BleProfileAction, 1> = Channel::new();
-
-/// Test-only stand-in for the BLE profile task: records the `Debug` form of every
-/// received action in `sink`, so a test can check what a profile-key gesture sent.
-#[cfg(feature = "std")]
-#[doc(hidden)]
-pub async fn drain_ble_profile_channel_for_test(sink: &mut std::vec::Vec<std::string::String>) {
-    #[cfg(feature = "_ble")]
-    loop {
-        sink.push(std::format!("{:?}", BLE_PROFILE_CHANNEL.receive().await));
-    }
-    #[cfg(not(feature = "_ble"))]
-    {
-        let _ = sink;
-        core::future::pending::<()>().await
-    }
-}
 
 /// Vial RX from BLE GATT `output_data` writes — one 32-byte chunk per write.
 /// Pushed by `gatt_events_task`, drained by [`crate::ble::host::HostGattHandler::run`].
@@ -131,8 +107,3 @@ pub(crate) static VIAL_BLE_RX_CHANNEL: Channel<RawMutex, [u8; 32], VIAL_CHANNEL_
 /// Rynk RX from the BLE `output_data` writes. The 512 B ring is ~2× one MTU's maximal payload.
 #[cfg(all(feature = "rynk", feature = "_ble"))]
 pub(crate) static RYNK_BLE_RX_PIPE: embassy_sync::pipe::Pipe<RawMutex, 512> = embassy_sync::pipe::Pipe::new();
-
-/// Macros are triggered on key press but run by the keyboard loop to avoid recursion
-/// (`execute_macro` dispatches a macro's ops back through the action path).
-/// Producer: the `TriggerMacro` action. Consumer: the keyboard loop.
-pub(crate) static MACRO_TRIGGER_CHANNEL: Channel<RawMutex, (u8, KeyboardEvent), 4> = Channel::new();

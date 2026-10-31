@@ -70,9 +70,13 @@ pub(crate) fn chip_init_default(hardware: &Hardware, peripheral_id: Option<usize
         }
         ChipSeries::Nrf52 => {
             let features = get_rmk_features();
-            let info = if is_feature_enabled(&features, "usb_log") || is_feature_enabled(&features, "log") {
+            let info = if is_feature_enabled(&features, "usb_log")
+                || is_feature_enabled(&features, "log")
+            {
                 quote! { ::log::info }
-            } else { quote! { ::defmt::info } };
+            } else {
+                quote! { ::defmt::info }
+            };
             let chip_cfg = &hardware.chip_config;
             let dcdc_config = if chip.chip == "nrf52840" {
                 let reg0_enabled = chip_cfg.dcdc_reg0.unwrap_or(true);
@@ -91,8 +95,20 @@ pub(crate) fn chip_init_default(hardware: &Hardware, peripheral_id: Option<usize
                 }
             } else if chip.chip == "nrf52833" {
                 let reg1_enabled = chip_cfg.dcdc_reg1.unwrap_or(true);
+                // No DC/DC switch for REG0 on this part, but its output voltage is the same
+                // UICR.REGOUT0 setting as on the nRF52840. Left untouched unless configured.
+                let reg0_voltage = match chip_cfg.dcdc_reg0_voltage {
+                    Some(DcdcReg0Voltage::V1_8) => quote! {
+                        config.dcdc.reg0_voltage = Some(::embassy_nrf::config::Reg0Voltage::_1V8);
+                    },
+                    Some(DcdcReg0Voltage::V3_3) => quote! {
+                        config.dcdc.reg0_voltage = Some(::embassy_nrf::config::Reg0Voltage::_3V3);
+                    },
+                    None => quote! {},
+                };
                 quote! {
                     config.dcdc.reg1 = #reg1_enabled;
+                    #reg0_voltage
                     #info!("DCDC config: reg1={}", #reg1_enabled);
                 }
             } else {
@@ -112,39 +128,11 @@ pub(crate) fn chip_init_default(hardware: &Hardware, peripheral_id: Option<usize
                 quote! {}
             };
             let ble_addr = get_ble_addr(hardware, peripheral_id);
-            // Calculate the size of sdc memory pool.
-            // Unibody: 4696. Split central: 6080 + (N-1) * 2288 per peripheral.
-            // Base memory sizes for the nrf-sdc memory pool
-            const SDC_MEM_UNIBODY: usize = 4696;
-            const SDC_MEM_SPLIT_BASE: usize = 6080;
-            const SDC_MEM_PER_EXTRA_PERIPHERAL: usize = 2288;
-
-            // Connection subrating adds extra memory per connection
-            const SDC_MEM_SUBRATING_BASE: usize = 136;
-            const SDC_MEM_SUBRATING_PER_PERIPHERAL: usize = 56;
-            const SDC_MEM_SUBRATING_PER_EXTRA_PERIPHERAL: usize = 8;
-
-            let subrating_enabled =
-                peri_num > 0 && is_feature_enabled(&get_rmk_features(), "subrating");
-
-            let sdc_mem_size = if peripheral_id.is_none() && peri_num > 0 {
-                // Split central
-                let base =
-                    SDC_MEM_SPLIT_BASE + peri_num.saturating_sub(1) * SDC_MEM_PER_EXTRA_PERIPHERAL;
-                if subrating_enabled {
-                    base + SDC_MEM_SUBRATING_BASE
-                        + peri_num.saturating_sub(1) * SDC_MEM_SUBRATING_PER_PERIPHERAL
-                        + peri_num.saturating_sub(2) * SDC_MEM_SUBRATING_PER_EXTRA_PERIPHERAL
-                } else {
-                    base
-                }
+            let central_links = if peripheral_id.is_some() { 0 } else { peri_num };
+            let peripheral_links = if peripheral_id.is_some() {
+                quote! { 1 }
             } else {
-                // Unibody or split peripheral
-                if subrating_enabled {
-                    SDC_MEM_UNIBODY + SDC_MEM_SUBRATING_BASE
-                } else {
-                    SDC_MEM_UNIBODY
-                }
+                quote! { ::rmk::ble::NUM_HOST_LINKS }
             };
             let ble_init = match &communication {
                 CommunicationConfig::Ble(_) | CommunicationConfig::Both(_, _) => quote! {
@@ -173,7 +161,7 @@ pub(crate) fn chip_init_default(hardware: &Hardware, peripheral_id: Option<usize
                         p.PPI_CH27, p.PPI_CH28, p.PPI_CH29,
                     );
                     let mut rng = ::embassy_nrf::rng::Rng::new(p.RNG, Irqs);
-                    let mut sdc_mem = ::nrf_sdc::Mem::<#sdc_mem_size>::new();
+                    let mut sdc_mem = ::nrf_sdc::Mem::<{ ::rmk::ble::calculate_sdc_memory_size(#central_links, #peripheral_links, SDC_PACKET_SIZE, SDC_TX_BUFFERS, SDC_RX_BUFFERS) }>::new();
                     let ble_controller = ::defmt::unwrap!(build_sdc(sdc_p, &mut rng, &*mpsl, &mut sdc_mem));
                     let ble_addr = #ble_addr;
                 },
@@ -193,7 +181,8 @@ pub(crate) fn chip_init_default(hardware: &Hardware, peripheral_id: Option<usize
             if communication.ble_enabled() {
                 quote! {
                     let config = ::embassy_rp::config::Config::default();
-                    let p = ::embassy_rp::init(config);
+                    #[allow(unused_mut)]
+                    let mut p = ::embassy_rp::init(config);
 
                     #[cfg(feature = "skip-cyw43-firmware")]
                     let (fw, clm, btfw, nvram) = {
@@ -243,19 +232,30 @@ pub(crate) fn chip_init_default(hardware: &Hardware, peripheral_id: Option<usize
             } else {
                 quote! {
                     let config = ::embassy_rp::config::Config::default();
-                    let p = ::embassy_rp::init(config);
+                    #[allow(unused_mut)]
+                    let mut p = ::embassy_rp::init(config);
                 }
             }
         }
         ChipSeries::Esp32 => {
             let ble_addr = get_ble_addr(hardware, peripheral_id);
+            let battery = match peripheral_id {
+                Some(id) => &hardware.peripheral_batteries[id],
+                None => &hardware.battery,
+            };
+            // Battery measurement and the optional ADC entropy source both need ADC1.
+            let adc_entropy_init = if battery.adc.is_none() {
+                quote! { let _trng_source = ::esp_hal::rng::TrngSource::new(p.RNG, p.ADC1); }
+            } else {
+                quote! {}
+            };
             quote! {
                 ::esp_println::logger::init_logger_from_env();
                 let p = ::esp_hal::init(::esp_hal::Config::default().with_cpu_clock(::esp_hal::clock::CpuClock::max()));
                 ::esp_alloc::heap_allocator!(size: 72 * 1024);
                 let timg0 = ::esp_hal::timer::timg::TimerGroup::new(p.TIMG0);
                 ::esp_rtos::start(timg0.timer0, p.FROM_CPU_INTR0);
-                let _trng_source = ::esp_hal::rng::TrngSource::new(p.RNG, p.ADC1);
+                #adc_entropy_init
                 let connector = ::esp_radio::ble::controller::BleConnector::new(p.BT, Default::default()).unwrap();
                 let ble_controller: ::bt_hci::controller::ExternalController<_, 64> = ::bt_hci::controller::ExternalController::new(connector);
                 let ble_addr = #ble_addr;
@@ -330,5 +330,62 @@ fn get_ble_addr(hardware: &Hardware, peripheral_id: Option<usize>) -> TokenStrea
                 #(#addr),*
             ]
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use quote::quote;
+    use rmk_config::KeyboardTomlConfig;
+
+    use super::chip_init_default;
+
+    /// The chip init generated for an nRF52833 keyboard whose `[chip.nrf52833]` holds `chip_section`.
+    fn nrf52833_chip_init(name: &str, chip_section: &str) -> String {
+        let path =
+            std::env::temp_dir().join(format!("rmk-macro-{name}-{}.toml", std::process::id()));
+        let toml = format!(
+            r#"
+[keyboard]
+name = "REG0 test"
+vendor_id = 0x4c4b
+product_id = 0x4643
+chip = "nrf52833"
+
+[matrix]
+row_pins = ["P0_02"]
+col_pins = ["P0_03"]
+
+[layout]
+rows = 1
+cols = 1
+
+[chip.nrf52833]
+{chip_section}
+"#
+        );
+        std::fs::write(&path, toml).unwrap();
+        let hardware = KeyboardTomlConfig::new_from_toml_path(&path).hardware();
+        std::fs::remove_file(&path).ok();
+        chip_init_default(&hardware.unwrap_or_else(|e| panic!("{e}")), None).to_string()
+    }
+
+    #[test]
+    fn nrf52833_writes_the_configured_reg0_voltage() {
+        let tokens = nrf52833_chip_init("reg0-3v3", r#"dcdc_reg0_voltage = "3V3""#);
+        let expected =
+            quote! { config.dcdc.reg0_voltage = Some(::embassy_nrf::config::Reg0Voltage::_3V3); };
+        assert!(tokens.contains(&expected.to_string()), "{tokens}");
+
+        let tokens = nrf52833_chip_init("reg0-1v8", r#"dcdc_reg0_voltage = "1V8""#);
+        let expected =
+            quote! { config.dcdc.reg0_voltage = Some(::embassy_nrf::config::Reg0Voltage::_1V8); };
+        assert!(tokens.contains(&expected.to_string()), "{tokens}");
+    }
+
+    #[test]
+    fn nrf52833_leaves_reg0_alone_unless_configured() {
+        let tokens = nrf52833_chip_init("reg0-unset", "dcdc_reg1 = true");
+        assert!(!tokens.contains("reg0_voltage"), "{tokens}");
     }
 }

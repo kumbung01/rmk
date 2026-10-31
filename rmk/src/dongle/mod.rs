@@ -19,10 +19,10 @@ mod vial_router;
 use core::cell::Cell;
 use core::ops::ControlFlow;
 
-use bt_hci::cmd::le::{LeReadLocalSupportedFeatures, LeSetPhy, LeSetScanParams};
+use bt_hci::cmd::le::{LeRand, LeReadLocalSupportedFeatures, LeSetPhy};
 use bt_hci::controller::{ControllerCmdAsync, ControllerCmdSync};
 use bt_hci::param::{AddrKind, BdAddr, LeAdvEventKind, Status};
-use embassy_futures::join::join;
+use embassy_futures::join::join3;
 use embassy_futures::select::{Either, select, select3};
 use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::signal::Signal;
@@ -33,21 +33,23 @@ pub use router::DongleRouter;
 #[cfg(feature = "vial")]
 use router::VialReport;
 use trouble_host::prelude::*;
-use usbd_hid::descriptor::{MediaKeyboardReport, MouseReport, SystemControlReport};
+use usbd_hid::descriptor::{MediaKeyboardReport, SystemControlReport};
 #[cfg(feature = "vial")]
 use vial_router as router;
 
 use crate::ble::adv::Adv;
 use crate::ble::profile::{ProfileInfo, ProfileManager};
-use crate::ble::scan::{DONGLE_SCAN_WINDOW, scan_config, start_scan};
-use crate::ble::wait_for_stack_started;
+use crate::ble::scan::{DONGLE_SCAN_WINDOW, connect, scan_config, start_scan};
+use crate::ble::{CentralCmds, wait_for_stack_started};
 use crate::channel::send_hid_report;
 use crate::core_traits::Runnable;
+#[cfg(feature = "custom_message")]
+use crate::dongle::event::{CUSTOM_TO_DONGLE_UUID, CUSTOM_TO_KEYBOARD_UUID};
 use crate::dongle::event::{DONGLE_EVENT_CHAR_UUID, DONGLE_EVENT_SERVICE_UUID, DongleEvent};
 use crate::event::{
     DongleState, DongleStateEvent, EventSubscriber, LedIndicatorEvent, SubscribableEvent, publish_event,
 };
-use crate::hid::{CompositeReportType, KeyboardReport, Report};
+use crate::hid::{CompositeReportType, KeyboardReport, MOUSE_REPORT_SIZE, MouseReport, Report};
 use crate::{DONGLE_PAIRING_WINDOW_SECS, RawMutex};
 
 /// The dongle relays exactly one keyboard.
@@ -106,16 +108,12 @@ impl ScanHandler {
             bonded_asked: Signal::new(),
         }
     }
-}
-
-impl EventHandler for ScanHandler {
-    fn on_adv_reports(&self, mut it: LeAdvReportsIter<'_>) {
-        while let Some(Ok(report)) = it.next() {
-            let bonded = self.bonded_addr.lock(|addr| addr.get()) == Some(report.addr);
-            if Adv::decode(report.data) == Some(Adv::DongleSeeking) {
-                debug!("[dongle] seeking keyboard {:?} rssi {}", report.addr, report.rssi);
-                self.seeking_keyboard
-                    .signal(((report.addr_kind, report.addr), report.rssi));
+    fn on_reports<'a>(&self, reports: impl Iterator<Item = (Address, &'a [u8], i8, bool)>) {
+        for (address, data, rssi, directed) in reports {
+            let bonded = self.bonded_addr.lock(|addr| addr.get()) == Some(address.addr);
+            if Adv::decode(data) == Some(Adv::DongleSeeking) {
+                debug!("[dongle] seeking keyboard {:?} rssi {}", address.addr, rssi);
+                self.seeking_keyboard.signal(((address.kind, address.addr), rssi));
                 // Seeking again means it cleared its bond; the reconnect will re-pair.
                 if bonded {
                     self.bonded_asked.signal(());
@@ -123,11 +121,36 @@ impl EventHandler for ScanHandler {
             } else if bonded {
                 self.bonded_seen.signal(());
                 // Directed advertisements are only reported to their target: us.
-                if report.event_kind == LeAdvEventKind::AdvDirectInd {
+                if directed {
                     self.bonded_asked.signal(());
                 }
             }
         }
+    }
+}
+
+impl EventHandler for ScanHandler {
+    fn on_adv_reports(&self, it: LeAdvReportsIter<'_>) {
+        self.on_reports(it.map_while(Result::ok).map(|report| {
+            (
+                Address::new(report.addr_kind, report.addr),
+                report.data,
+                report.rssi,
+                report.event_kind == LeAdvEventKind::AdvDirectInd,
+            )
+        }));
+    }
+
+    #[cfg(feature = "ext_adv")]
+    fn on_ext_adv_reports(&self, it: bt_hci::param::LeExtAdvReportsIter<'_>) {
+        self.on_reports(it.map_while(Result::ok).map(|report| {
+            (
+                Address::new(report.addr_kind, report.addr),
+                report.data,
+                report.rssi,
+                report.event_kind.directed(),
+            )
+        }));
     }
 }
 
@@ -156,27 +179,37 @@ impl<'a, C> Dongle<'a, C> {
 impl<C> Runnable for Dongle<'_, C>
 where
     C: Controller
+        + CentralCmds
         + ControllerCmdAsync<LeSetPhy>
         + ControllerCmdSync<LeReadLocalSupportedFeatures>
-        + ControllerCmdSync<LeSetScanParams>,
+        + ControllerCmdSync<LeRand>,
 {
     async fn run(&mut self) -> ! {
         let controller = self.controller.take().expect("Dongle::run called twice");
+        crate::ble::rng::init(&controller).await;
         let mut resources = DongleBleResources::new();
         let stack = trouble_host::new(controller, &mut resources)
             .set_random_address(Address::random(self.address))
             .build();
         let stack = &stack;
         let scan = ScanHandler::new();
+        let mut profile_manager = ProfileManager::new(stack);
+        profile_manager.load_bonded_devices().await;
+        profile_manager.update_stack_bonds();
         let mut central = DongleCentral {
             stack,
             scan: &scan,
             router: self.router,
-            profiles: ProfileManager::new(stack),
+            profiles: &profile_manager,
             state: Cell::new(DongleState::default()),
         };
 
-        join(crate::ble::ble_task(stack.runner(), &scan), central.run()).await;
+        join3(
+            crate::ble::ble_task(stack.runner(), &scan),
+            central.run(),
+            profile_manager.run(),
+        )
+        .await;
         unreachable!("Dongle sub-tasks must run forever")
     }
 }
@@ -187,17 +220,14 @@ struct DongleCentral<'b, 's: 'b, C: Controller + ControllerCmdAsync<LeSetPhy>> {
     stack: &'b Stack<'s, C, DefaultPacketPool>,
     scan: &'b ScanHandler,
     router: &'b DongleRouter,
-    profiles: ProfileManager<'b, 's, C, DefaultPacketPool, 1>,
+    profiles: &'b ProfileManager<'b, 's, C, DefaultPacketPool, 1>,
     /// The last state published, so a path that ends where it began says nothing.
     state: Cell<DongleState>,
 }
 
 impl<'b, 's: 'b, C> DongleCentral<'b, 's, C>
 where
-    C: Controller
-        + ControllerCmdAsync<LeSetPhy>
-        + ControllerCmdSync<LeReadLocalSupportedFeatures>
-        + ControllerCmdSync<LeSetScanParams>,
+    C: Controller + CentralCmds + ControllerCmdAsync<LeSetPhy> + ControllerCmdSync<LeReadLocalSupportedFeatures>,
 {
     /// Publish current `DongleState` if it is a change.
     fn set_state(&self, state: DongleState) {
@@ -208,10 +238,8 @@ where
 
     async fn run(&mut self) -> ! {
         wait_for_stack_started().await;
-        self.profiles.load_bonded_devices().await;
-        self.profiles.update_stack_bonds();
 
-        let bonded = self.profiles.active_bond_info().map(|b| b.info.identity.addr);
+        let bonded = self.profiles.bond_info(BOND_SLOT).map(|b| b.info.identity.addr);
         self.scan.bonded_addr.lock(|a| a.set(bonded.map(|addr| addr.addr)));
         // The only chance to pair while a bond exists: one window at boot, so a
         // keyboard the user already set seeking can replace the bonded one.
@@ -223,7 +251,7 @@ where
         }
 
         loop {
-            let bonded = self.profiles.active_bond_info().map(|b| b.info.identity.addr);
+            let bonded = self.profiles.bond_info(BOND_SLOT).map(|b| b.info.identity.addr);
             self.scan.bonded_addr.lock(|a| a.set(bonded.map(|addr| addr.addr)));
 
             if let Some(addr) = bonded {
@@ -263,7 +291,7 @@ where
             },
         };
         // If the keyboard is absent the attempt times out; the caller's loop retries.
-        match with_timeout(Duration::from_secs(15), central.connect(&config)).await {
+        match with_timeout(Duration::from_secs(15), connect(&mut central, &config)).await {
             Ok(Ok(conn)) => Some(conn),
             Ok(Err(e)) => {
                 #[cfg(feature = "defmt")]
@@ -383,21 +411,19 @@ where
                 // Save the new bond — also when the bonded keyboard cleared its side
                 // and re-paired, otherwise we keep an old key nothing accepts anymore.
                 Ok(ConnectionEvent::PairingComplete { bond: Some(bond), .. }) => {
-                    self.profiles
-                        .add_profile_info(ProfileInfo {
-                            slot_num: BOND_SLOT,
-                            removed: false,
-                            info: bond,
-                            cccd_table: heapless::Vec::new(),
-                        })
-                        .await;
+                    self.profiles.set_bond(ProfileInfo {
+                        slot_num: BOND_SLOT,
+                        removed: false,
+                        info: bond,
+                        cccd_table: heapless::Vec::new(),
+                    });
                     return true;
                 }
                 Ok(ConnectionEvent::Encrypted { .. } | ConnectionEvent::PairingComplete { .. }) => return true,
                 Ok(ConnectionEvent::PairingFailed(e)) => {
                     warn!("[dongle] pairing failed: {:?}", e);
                     if peer == Peer::Bonded {
-                        self.profiles.clear_bond(BOND_SLOT).await;
+                        self.profiles.clear_bond(BOND_SLOT);
                     }
                     return false;
                 }
@@ -407,7 +433,7 @@ where
                 Ok(ConnectionEvent::Disconnected { reason }) => {
                     if peer == Peer::Bonded && reason == Status::AUTHENTICATION_FAILURE {
                         warn!("[dongle] bonded keyboard refused our key, dropping the bond");
-                        self.profiles.clear_bond(BOND_SLOT).await;
+                        self.profiles.clear_bond(BOND_SLOT);
                     }
                     return false;
                 }
@@ -466,6 +492,10 @@ where
             loop {
                 let notification = listener.next().await;
                 let (handle, data) = (notification.handle(), notification.as_ref());
+                #[cfg(feature = "custom_message")]
+                let is_custom_message = chars.custom_to_dongle.as_ref().is_some_and(|ch| ch.handle == handle);
+                #[cfg(not(feature = "custom_message"))]
+                let is_custom_message = false;
                 // The config stream is the only one not parsed; it goes straight to the host.
                 if handle == chars.config_input.handle {
                     // A full pipe usually means the host is a moment behind, so wait 20ms at most.
@@ -487,6 +517,19 @@ where
                             }
                         }
                         Err(_) => warn!("[dongle] non-report-size vial notify dropped"),
+                    }
+                } else if is_custom_message {
+                    // The dongle is an end of the chain: nothing to forward to.
+                    #[cfg(feature = "custom_message")]
+                    match postcard::from_bytes::<crate::custom_message::CustomMessage>(data) {
+                        // An end of the chain: it delivers what names it and has nowhere
+                        // to relay the rest to.
+                        Ok(message) => {
+                            if message.target == crate::custom_message::CustomMessageTarget::Dongle {
+                                publish_event(message);
+                            }
+                        }
+                        Err(_) => warn!("[dongle] undecodable custom message dropped"),
                     }
                 } else if chars.event.as_ref().is_some_and(|ch| ch.handle == handle) {
                     // One notification is one whole event, so there is nothing to reassemble.
@@ -535,7 +578,22 @@ where
 
         // Three independent loops, not one combined one: an LED update must not
         // wait behind a config write, or the other way around.
+        #[cfg(not(feature = "custom_message"))]
         select3(keyboard_to_host, led_to_keyboard, request_to_keyboard).await;
+        #[cfg(feature = "custom_message")]
+        embassy_futures::select::select4(keyboard_to_host, led_to_keyboard, request_to_keyboard, async {
+            let Some(characteristic) = chars.custom_to_keyboard.as_ref() else {
+                return core::future::pending().await;
+            };
+            // The dongle has one link, so everything queued goes out on it.
+            crate::custom_message::forward(None, async |encoded| {
+                client
+                    .write_characteristic_without_response(characteristic, encoded)
+                    .await
+            })
+            .await
+        })
+        .await;
     }
 }
 
@@ -553,6 +611,11 @@ struct KeyboardCharacteristics {
     /// `None` on a keyboard whose firmware has no event service; the relay
     /// works without it, there is just nothing to publish.
     event: Option<Characteristic<[u8]>>,
+    /// `None` on a keyboard built without `custom_message`.
+    #[cfg(feature = "custom_message")]
+    custom_to_dongle: Option<Characteristic<[u8]>>,
+    #[cfg(feature = "custom_message")]
+    custom_to_keyboard: Option<Characteristic<[u8]>>,
 }
 
 impl KeyboardCharacteristics {
@@ -599,6 +662,10 @@ impl KeyboardCharacteristics {
         };
 
         let mut event = None;
+        #[cfg(feature = "custom_message")]
+        let mut custom_to_dongle = None;
+        #[cfg(feature = "custom_message")]
+        let mut custom_to_keyboard = None;
         if let Ok(services) = client.services_by_uuid(&DONGLE_EVENT_SERVICE_UUID.into()).await
             && let Some(service) = services.into_iter().next()
         {
@@ -606,6 +673,17 @@ impl KeyboardCharacteristics {
                 .characteristic_by_uuid::<[u8]>(&service, &DONGLE_EVENT_CHAR_UUID.into())
                 .await
                 .ok();
+            #[cfg(feature = "custom_message")]
+            {
+                custom_to_dongle = client
+                    .characteristic_by_uuid::<[u8]>(&service, &CUSTOM_TO_DONGLE_UUID.into())
+                    .await
+                    .ok();
+                custom_to_keyboard = client
+                    .characteristic_by_uuid::<[u8]>(&service, &CUSTOM_TO_KEYBOARD_UUID.into())
+                    .await
+                    .ok();
+            }
         }
 
         Some(Self {
@@ -617,6 +695,10 @@ impl KeyboardCharacteristics {
             config_input,
             config_output,
             event,
+            #[cfg(feature = "custom_message")]
+            custom_to_dongle,
+            #[cfg(feature = "custom_message")]
+            custom_to_keyboard,
         })
     }
 
@@ -631,7 +713,16 @@ impl KeyboardCharacteristics {
         ]
         .into_iter()
         .chain(self.event.as_ref())
-        {
+        .chain({
+            #[cfg(feature = "custom_message")]
+            {
+                self.custom_to_dongle.as_ref()
+            }
+            #[cfg(not(feature = "custom_message"))]
+            {
+                None
+            }
+        }) {
             if let Some(cccd) = ch.cccd_handle {
                 client.write_handle(cccd, &[0x01, 0x00]).await.ok()?;
             }
@@ -649,13 +740,13 @@ impl KeyboardCharacteristics {
                 leds: 0,
                 keycodes: data[2..8].try_into().unwrap(),
             }))
-        } else if handle == self.mouse.handle && data.len() >= 5 {
+        } else if handle == self.mouse.handle && data.len() >= MOUSE_REPORT_SIZE {
             Some(Report::MouseReport(MouseReport {
                 buttons: data[0],
-                x: data[1] as i8,
-                y: data[2] as i8,
-                wheel: data[3] as i8,
-                pan: data[4] as i8,
+                x: i16::from_le_bytes([data[1], data[2]]),
+                y: i16::from_le_bytes([data[3], data[4]]),
+                wheel: i16::from_le_bytes([data[5], data[6]]),
+                pan: i16::from_le_bytes([data[7], data[8]]),
             }))
         } else if handle == self.media.handle && data.len() >= 2 {
             Some(Report::MediaKeyboardReport(MediaKeyboardReport {
@@ -728,7 +819,10 @@ async fn release_held_keys() {
 #[cfg(test)]
 mod tests {
     use bt_hci::FromHciBytes;
-    use bt_hci::param::LeAdvReports;
+    #[cfg(not(feature = "ext_adv"))]
+    use bt_hci::param::LeAdvReports as RawReports;
+    #[cfg(feature = "ext_adv")]
+    use bt_hci::param::LeExtAdvReports as RawReports;
 
     use super::*;
 
@@ -743,16 +837,24 @@ mod tests {
     /// A host advertisement carries no RMK payload; flags alone stand in for it.
     const HOST_DATA: &[u8] = &[0x02, 0x01, 0x06];
 
-    /// One legacy advertising report as the controller lays it out:
-    /// count, kind, address kind, address, data length, data, rssi.
+    /// Deliver the same legacy PDU through the selected HCI report format.
     fn report(handler: &ScanHandler, event_kind: u8, addr: [u8; 6], data: &[u8]) {
-        let mut bytes: heapless::Vec<u8, 64> = heapless::Vec::new();
-        bytes.extend_from_slice(&[1, event_kind, 1]).unwrap();
-        bytes.extend_from_slice(&addr).unwrap();
-        bytes.push(data.len() as u8).unwrap();
-        bytes.extend_from_slice(data).unwrap();
-        bytes.push(0xC0).unwrap(); // rssi
-        let (reports, _) = LeAdvReports::from_hci_bytes(&bytes).unwrap();
+        let mut bytes = std::vec![1];
+        #[cfg(not(feature = "ext_adv"))]
+        bytes.extend([event_kind, 1]);
+        #[cfg(feature = "ext_adv")]
+        bytes.extend([if event_kind == ADV_DIRECT_IND { 0x15 } else { 0x13 }, 0, 1]);
+        bytes.extend_from_slice(&addr);
+        #[cfg(feature = "ext_adv")]
+        bytes.extend([1, 0, 0xFF, 0x7F, 0xC0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        bytes.push(data.len() as u8);
+        bytes.extend_from_slice(data);
+        #[cfg(not(feature = "ext_adv"))]
+        bytes.push(0xC0);
+        let (reports, _) = RawReports::from_hci_bytes(&bytes).unwrap();
+        #[cfg(feature = "ext_adv")]
+        handler.on_ext_adv_reports(reports.iter());
+        #[cfg(not(feature = "ext_adv"))]
         handler.on_adv_reports(reports.iter());
     }
 

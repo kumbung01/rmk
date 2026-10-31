@@ -3,9 +3,10 @@ use quote::{format_ident, quote};
 use rmk_config::SplitConnection;
 use rmk_config::resolved::hardware::{BoardConfig, CommunicationConfig};
 use rmk_config::resolved::{Behavior, Hardware, Host};
-use syn::{ItemFn, ItemMod};
+use syn::ItemMod;
 
 use super::override_helper::Overwritten;
+use crate::codegen::chip::flash::expand_dfu_interface;
 use crate::codegen::feature::{get_rmk_features, is_feature_enabled};
 
 #[allow(clippy::too_many_arguments)]
@@ -20,45 +21,27 @@ pub(crate) fn expand_rmk_entry(
     watchdog_task: Option<TokenStream2>,
 ) -> TokenStream2 {
     // If there is a function with `#[Overwritten(entry)]`, override the entry
-    if let Some((_, items)) = &item_mod.content {
-        items
-            .iter()
-            .find_map(|item| {
-                if let syn::Item::Fn(item_fn) = &item
-                    && let Some(Ok(Overwritten::Entry)) =
-                        super::override_helper::find_overwritten(item_fn)
-                {
-                    return Some(override_rmk_entry(item_fn));
-                }
-                None
-            })
-            .unwrap_or(rmk_entry_select(
-                hardware,
-                host,
-                behavior,
-                devices,
-                processors,
-                registered_processors,
-                watchdog_task,
-            ))
-    } else {
-        rmk_entry_select(
-            hardware,
-            host,
-            behavior,
-            devices,
-            processors,
-            registered_processors,
-            watchdog_task,
-        )
-    }
-}
-
-fn override_rmk_entry(item_fn: &ItemFn) -> TokenStream2 {
-    let content = &item_fn.block.stmts;
-    quote! {
-        #(#content)*
-    }
+    let entry_override = item_mod.content.as_ref().and_then(|(_, items)| {
+        items.iter().find_map(|item| {
+            if let syn::Item::Fn(item_fn) = item
+                && let Some(Ok(Overwritten::Entry)) =
+                    super::override_helper::find_overwritten(item_fn)
+            {
+                let content = &item_fn.block.stmts;
+                return Some(quote! { #(#content)* });
+            }
+            None
+        })
+    });
+    entry_override.unwrap_or(rmk_entry_select(
+        hardware,
+        host,
+        behavior,
+        devices,
+        processors,
+        registered_processors,
+        watchdog_task,
+    ))
 }
 
 pub(crate) fn rmk_entry_select(
@@ -124,8 +107,28 @@ pub(crate) fn rmk_entry_select(
         }
         _ => quote! {},
     };
-    let (transport_prelude, transport_tasks) =
-        transport_setup(host, communication, split_peripheral_matrices);
+    // The DFU updater task only attaches to a USB transport. Split centrals
+    // seed the transport's passthrough alt slots from the peripheral count.
+    let communication_uses_usb = matches!(
+        communication,
+        CommunicationConfig::Usb(_) | CommunicationConfig::Both(_, _)
+    );
+    let (dfu_interface, num_peripherals) = if cfg!(feature = "_dfu") && communication_uses_usb {
+        let num_peripherals = match board {
+            BoardConfig::Split(split) => split.peripheral.len(),
+            BoardConfig::UniBody(_) => 0,
+        };
+        (expand_dfu_interface(hardware.dfu.as_ref()), num_peripherals)
+    } else {
+        (quote! {}, 0)
+    };
+    let (transport_prelude, transport_tasks) = transport_setup(
+        host,
+        communication,
+        split_peripheral_matrices,
+        &dfu_interface,
+        num_peripherals,
+    );
 
     let entry = match board {
         BoardConfig::Split(split_config) => {
@@ -180,8 +183,8 @@ pub(crate) fn rmk_entry_select(
                             let rmk_features = get_rmk_features();
                             let dfu_split_enabled = is_feature_enabled(&rmk_features, "dfu_split");
                             let policy = if dfu_split_enabled {
-                                match p.update_policy.as_deref() {
-                                    Some("force") => {
+                                match p.update_policy {
+                                    Some(rmk_config::UpdatePolicy::Force) => {
                                         quote! { ::rmk::split::central::UpdatePolicy::Force }
                                     }
                                     _ => quote! { ::rmk::split::central::UpdatePolicy::MatchHash },
@@ -223,7 +226,7 @@ pub(crate) fn rmk_entry_select(
                         let row_offset = p.row_offset as u8;
                         let col_offset = p.col_offset as u8;
                         let policy = if dfu {
-                            if p.update_policy.as_deref() == Some("force") {
+                            if matches!(p.update_policy, Some(rmk_config::UpdatePolicy::Force)) {
                                 quote! { ::rmk::split::central::UpdatePolicy::Force, }
                             } else {
                                 quote! { ::rmk::split::central::UpdatePolicy::MatchHash, }
@@ -306,6 +309,8 @@ fn transport_setup(
     host: &Host,
     communication: &CommunicationConfig,
     split_peripheral_matrices: TokenStream2,
+    dfu_interface: &TokenStream2,
+    num_peripherals: usize,
 ) -> (TokenStream2, Vec<TokenStream2>) {
     let wpm_prelude = quote! {
         let mut wpm_processor = ::rmk::processor::builtin::wpm::WpmProcessor::new();
@@ -320,13 +325,29 @@ fn transport_setup(
         quote! {}
     };
 
+    let dfu_split_enabled = is_feature_enabled(&get_rmk_features(), "dfu_split");
+    let usb_device_config = if matches!(communication, CommunicationConfig::Both(_, _)) {
+        quote! { rmk_config.device_config.clone() }
+    } else {
+        quote! { rmk_config.device_config }
+    };
+    let dfu_split_arg =
+        (dfu_split_enabled && !dfu_interface.is_empty()).then(|| quote! { , #num_peripherals });
     let usb_prelude = quote! {
-        let mut usb_transport = ::rmk::usb::UsbTransport::new(driver, rmk_config.device_config)#with_host;
+        #dfu_interface
+        let mut usb_transport = ::rmk::usb::UsbTransport::new(driver, #usb_device_config #dfu_split_arg)#with_host;
     };
     let ble_prelude = quote! {
         let mut ble_transport = ::rmk::ble::BleTransport::new(ble_controller, ble_addr, rmk_config #split_peripheral_matrices) #with_host;
     };
     let ble_task = quote! { ble_transport.run() };
+
+    // The DFU updater task runs alongside the transport it feeds.
+    let dfu_task = if dfu_interface.is_empty() {
+        quote! {}
+    } else {
+        quote! { dfu_iface.run() }
+    };
 
     match communication {
         CommunicationConfig::Usb(_) => {
@@ -334,7 +355,11 @@ fn transport_setup(
                 #wpm_prelude
                 #usb_prelude
             };
-            (prelude, vec![quote! { usb_transport.run() }, wpm_task])
+            let mut tasks = vec![quote! { usb_transport.run() }, wpm_task];
+            if !dfu_task.is_empty() {
+                tasks.push(dfu_task);
+            }
+            (prelude, tasks)
         }
         CommunicationConfig::Ble(_) => {
             let prelude = quote! {
@@ -349,10 +374,11 @@ fn transport_setup(
                 #usb_prelude
                 #ble_prelude
             };
-            (
-                prelude,
-                vec![quote! { usb_transport.run() }, ble_task, wpm_task],
-            )
+            let mut tasks = vec![quote! { usb_transport.run() }, ble_task, wpm_task];
+            if !dfu_task.is_empty() {
+                tasks.insert(1, dfu_task);
+            }
+            (prelude, tasks)
         }
         CommunicationConfig::None => panic!("USB and BLE are both disabled"),
     }

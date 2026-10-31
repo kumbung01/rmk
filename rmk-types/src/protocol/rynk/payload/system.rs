@@ -6,10 +6,8 @@ use heapless::{String, Vec};
 use postcard::experimental::max_size::MaxSize;
 use serde::{Deserialize, Serialize};
 
+use crate::DEVICE_INFO_STRING_MAX_LEN;
 use crate::morse::MorseProfile;
-
-/// Maximum byte length of each `DeviceInfo` string field.
-pub const DEVICE_INFO_STRING_SIZE: usize = 32;
 
 /// Protocol version advertised during the connection handshake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, MaxSize)]
@@ -22,8 +20,8 @@ pub struct ProtocolVersion {
 
 impl ProtocolVersion {
     /// Current protocol version for this firmware release.
-    /// Now the protocol is still being developed, so the version is v0.1
-    pub const CURRENT: Self = Self { major: 0, minor: 1 };
+    /// Now the protocol is still being developed, so the version is v0.2
+    pub const CURRENT: Self = Self { major: 0, minor: 2 };
 }
 
 /// Device capabilities discovered during the connection handshake.
@@ -43,8 +41,14 @@ pub struct DeviceCapabilities {
     pub num_encoders: u8,
     pub max_combos: u8,
     pub max_combo_keys: u8,
-    /// Byte size of the flat macro region. `0` disables macro data endpoints.
+    /// Macro slots, `GetMacro`/`SetMacro` index below this.
+    pub max_macros: u8,
+    /// Bytes of the buffer every macro shares, in the postcard encoding
+    /// `GetMacro`/`SetMacro` carry, each slot costing its length prefix.
     pub macro_space_size: u16,
+    /// Whether `SetMacro` persists; a firmware without storage serves its
+    /// compiled-in macros read-only.
+    pub macros_writable: bool,
     pub max_morse: u8,
     pub max_patterns_per_key: u8,
     pub max_forks: u8,
@@ -67,7 +71,6 @@ pub struct DeviceCapabilities {
     /// pipelined reads. Separate from `max_bulk_keys` because these items are
     /// far larger than keys. Writes pack by encoded size up to `max_payload_size`.
     pub max_bulk_items: u8,
-    pub macro_chunk_size: u16,
     pub bulk_transfer_supported: bool,
 }
 
@@ -94,11 +97,11 @@ pub struct DeviceInfo {
     pub vendor_id: u16,
     pub product_id: u16,
     #[cfg_attr(feature = "wasm", tsify(type = "string"))]
-    pub manufacturer: String<DEVICE_INFO_STRING_SIZE>,
+    pub manufacturer: String<DEVICE_INFO_STRING_MAX_LEN>,
     #[cfg_attr(feature = "wasm", tsify(type = "string"))]
-    pub product_name: String<DEVICE_INFO_STRING_SIZE>,
+    pub product_name: String<DEVICE_INFO_STRING_MAX_LEN>,
     #[cfg_attr(feature = "wasm", tsify(type = "string"))]
-    pub serial_number: String<DEVICE_INFO_STRING_SIZE>,
+    pub serial_number: String<DEVICE_INFO_STRING_MAX_LEN>,
 }
 
 impl MaxSize for DeviceInfo {
@@ -106,7 +109,7 @@ impl MaxSize for DeviceInfo {
     // `Vec<u8, N>`, so the Vec bound covers each string field.
     const POSTCARD_MAX_SIZE: usize = FirmwareVersion::POSTCARD_MAX_SIZE
         + 2 * u16::POSTCARD_MAX_SIZE
-        + 3 * crate::heapless_vec_max_size::<u8, DEVICE_INFO_STRING_SIZE>();
+        + 3 * crate::heapless_vec_max_size::<u8, DEVICE_INFO_STRING_MAX_LEN>();
 }
 
 /// Current lock/unlock state of this Rynk session, returned by `GetLockStatus`
@@ -187,7 +190,9 @@ mod tests {
             num_encoders: 2,
             max_combos: 16,
             max_combo_keys: 4,
-            macro_space_size: 2048,
+            max_macros: 32,
+            macro_space_size: 256,
+            macros_writable: true,
             max_morse: 8,
             max_patterns_per_key: 8,
             max_forks: 4,
@@ -200,7 +205,6 @@ mod tests {
             max_payload_size: 256,
             max_bulk_keys: 32,
             max_bulk_items: 8,
-            macro_chunk_size: 64,
             bulk_transfer_supported: true,
         });
         round_trip(&DeviceCapabilities {
@@ -210,7 +214,9 @@ mod tests {
             num_encoders: 0,
             max_combos: 0,
             max_combo_keys: 0,
+            max_macros: 0,
             macro_space_size: 0,
+            macros_writable: false,
             max_morse: 0,
             max_patterns_per_key: 0,
             max_forks: 0,
@@ -223,7 +229,6 @@ mod tests {
             max_payload_size: 0,
             max_bulk_keys: 0,
             max_bulk_items: 0,
-            macro_chunk_size: 0,
             bulk_transfer_supported: false,
         });
     }
@@ -231,8 +236,8 @@ mod tests {
     #[test]
     fn round_trip_device_info() {
         // Fill strings and ids so varints take their full width.
-        let full: String<DEVICE_INFO_STRING_SIZE> = String::try_from("🦀🦀🦀🦀🦀🦀🦀🦀").unwrap();
-        assert_eq!(full.len(), DEVICE_INFO_STRING_SIZE);
+        let full: String<DEVICE_INFO_STRING_MAX_LEN> = String::try_from("🦀🦀🦀🦀🦀🦀🦀🦀").unwrap();
+        assert_eq!(full.len(), DEVICE_INFO_STRING_MAX_LEN);
         let info = DeviceInfo {
             rmk_version: FirmwareVersion {
                 major: 255,

@@ -100,24 +100,25 @@ combos = [
 
 ## Macro
 
-In the `macro` sub-table, you can configure the keyboard's macro functionality. Macros are explained in more detail in the [keyboard macros](./keymap_configuration/keyboard_macros.md) page.
+The `macro` sub-table defines the default macros. [Keyboard macros](./keymap_configuration/keyboard_macros.md) explains what each operation does and the limits a macro must follow.
 
-Macro operations are defined with an `operation` and a `keycode`, `duration` or `text` field depending on the operation. Available operations are:
+Each operation has an `operation` name and, depending on it, a `keycode`, `duration` or `text` field:
 
 ```toml
 [[behavior.macro.macros]]
 operations = [
-  { operation = "down", keycode = "_" }, # [!code focus:5]
+  { operation = "down", keycode = "_" }, # [!code focus:6]
   { operation = "up", keycode = "_" },
   { operation = "tap", keycode = "_" },
   { operation = "delay", duration = "0ms" },
-  { operation = "text", text = "foo" }
+  { operation = "text", text = "foo" },
+  { operation = "pause_for_release" },
 ]
 ```
 
-- `keycode` accepts a plain [keycode](./keymap_configuration/keycodes.md) or an action expression such as `WM(A, LCtrl)`, `PDF(1)` or `OSM(LShift)`. Action expressions use the Vial extended encoding and require the `vial` feature; without it, the build fails.
-- `duration` is at most 65024ms; longer delays fail the build.
-- A macro cannot trigger another macro. `Macro(n)` inside a macro is ignored with a warning.
+- `keycode` takes a [keycode](./keymap_configuration/keycodes.md) or a single action such as `WM(A, LCtrl)`, `MO(1)` or `Macro(n)`. Tap-hold and tap-dance keys (`MT`, `LT`, `TH`, `TT`, `TD`) are not accepted.
+- `duration` takes a time such as `100ms` or `1s`, at most 65535 ms.
+- `text` is ASCII.
 
 ```toml
 # Outputs "Hello"
@@ -457,9 +458,10 @@ In the `fork` sub-table, you can configure the keyboard's state-based key fork f
 Fork configuration includes the following parameters:
 
 - `forks`: An array containing all defined forks. Each fork configuration is an object containing the following attributes:
-  - `trigger`: Defines the triggering key.
-  - `negative_output`: A string defining the output action to be triggered when the conditions are not met
-  - `positive_output`: A string defining the output action to be triggered when the conditions are met
+  - `trigger`: Defines the triggering key, or a list of keys. A list creates one fork per key, each counting toward `fork_max_num`.
+  - `negative_output`: A string defining the output action to be triggered when the conditions are not met. If omitted, the trigger key is left alone and no modifiers are suppressed (optional)
+  - `positive_output`: A string defining the output action to be triggered when the conditions are met. Defaults to the trigger key (optional)
+  - `layers`: A list of layers the trigger key must come from. Defaults to all layers (optional)
   - `match_any`: A string defining a combination of modifier keys, lock LEDs, mouse buttons (optional)
   - `match_none`: A string defining a combination of modifier keys, lock LEDs, mouse buttons (optional)
   - `kept_modifiers`: A string defining a combination of modifier keys, which should not be 'suppressed' from the keyboard state for the time the replacement action is executed (optional)
@@ -500,6 +502,12 @@ forks = [
   # Shift + Backspace output Delete key (inside a layer tap/hold)
   { trigger = "LT(2, Backspace)", negative_output = "LT(2, Backspace)", positive_output = "LT(2, Delete)", match_any = "LShift|RShift" },
 
+  # Shift + Backspace output Delete key, but only on layer 0
+  { trigger = "Backspace", negative_output = "Backspace", positive_output = "Delete", match_any = "LShift|RShift", layers = [0] },
+
+  # Digits on layer 1 are typed without Shift, unless Ctrl is also held
+  { trigger = ["Kc1", "Kc2", "Kc3"], layers = [1], match_any = "LShift", match_none = "LCtrl" },
+
   # Ctrl + play/pause will send next track. MediaPlayPause -> MediaNextTrack
   # Ctrl + Shift + play/pause will send previous track. MediaPlayPause -> MediaPrevTrack
   # Alt + play/pause will send volume up. MediaPlayPause -> AudioVolUp
@@ -527,7 +535,9 @@ Vial does not support fork configuration yet.
 
 When multiple pointing devices are present, set `device_id` on each entry to target the device. An entry without `device_id` acts as a fallback for any device not covered by a more specific entry — leave `device_id` unset on a single entry to use one shared configuration for every device.
 
-Example configuration:
+Choose one of the following configurations. Each has at most one fallback entry.
+
+Use a shared fallback with a device-specific override:
 
 ```toml
 # Default for every pointing device.
@@ -542,15 +552,23 @@ device_id = 1
 target_layer = 4
 timeout = "500ms"
 threshold = 5
+```
 
-# Immediate deactivation on non-mouse key press, but keep the layer while
-# modifiers (Ctrl/Shift/Alt/Gui) are held so users can Ctrl-click, etc.
+To deactivate on non-mouse key presses while allowing modifier keys for Ctrl-click and similar actions:
+
+```toml
 [[behavior.auto_mouse_layer]]
 target_layer = 5
 deactivate_on_key = true
 extra_mouse_keys = ["LCtrl", "LShift", "LAlt", "LGui"]
 
-# Extend the timeout on any non-deactivating key press so users can continue clicking without cursor movement.
+[event.action]
+subs = 1
+```
+
+To also extend the timeout on non-deactivating key presses, allowing repeated clicks without cursor movement:
+
+```toml
 [[behavior.auto_mouse_layer]]
 target_layer = 6
 deactivate_on_key = true
