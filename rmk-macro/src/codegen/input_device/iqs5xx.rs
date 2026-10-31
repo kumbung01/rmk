@@ -15,7 +15,7 @@ pub(crate) fn expand_iqs5xx_device(
     }
 
     match chip.series {
-        ChipSeries::Nrf52 | ChipSeries::Rp2040 => {}
+        ChipSeries::Nrf52 | ChipSeries::Nrf54 | ChipSeries::Rp2040 => {}
         _ => {
             panic!("IQS5xx is only supported on nRF52 and RP2040 chips");
         }
@@ -47,7 +47,7 @@ pub(crate) fn expand_iqs5xx_device(
         let proc_swap_xy = sensor.proc_swap_xy;
 
         let rdy_init = match (&sensor.rdy, &chip.series) {
-            (Some(rdy_pin), ChipSeries::Nrf52) => {
+            (Some(rdy_pin), ChipSeries::Nrf52 | ChipSeries::Nrf54) => {
                 let rdy_pin_ident = format_ident!("{}", rdy_pin);
                 quote! {
                     let #rdy_ident = Some(::embassy_nrf::gpio::Input::new(
@@ -65,7 +65,7 @@ pub(crate) fn expand_iqs5xx_device(
                     ));
                 }
             }
-            (None, ChipSeries::Nrf52) => quote! {
+            (None, ChipSeries::Nrf52 | ChipSeries::Nrf54) => quote! {
                 let #rdy_ident: Option<::embassy_nrf::gpio::Input<'static>> = None;
             },
             (None, ChipSeries::Rp2040) => quote! {
@@ -75,7 +75,7 @@ pub(crate) fn expand_iqs5xx_device(
         };
 
         let device_init = match chip.series {
-            ChipSeries::Nrf52 => quote! {
+            ChipSeries::Nrf52 | ChipSeries::Nrf54 => quote! {
                 #rdy_init
                 static #i2c_ident: ::static_cell::StaticCell<[u8; 16]> = ::static_cell::StaticCell::new();
                 let #i2c_ident = #i2c_ident.init([0u8; 16]);
@@ -150,7 +150,7 @@ pub(crate) fn expand_iqs5xx_interrupts(
     let entries = iqs5xx_config.iter().map(|sensor| {
         let instance = format_ident!("{}", sensor.i2c.instance.to_uppercase());
         match chip_series {
-            ChipSeries::Nrf52 => quote! {
+            ChipSeries::Nrf52 | ChipSeries::Nrf54 => quote! {
                 #instance => ::embassy_nrf::twim::InterruptHandler<::embassy_nrf::peripherals::#instance>;
             },
             ChipSeries::Rp2040 => {

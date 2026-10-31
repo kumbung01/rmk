@@ -16,7 +16,7 @@ pub(crate) fn expand_pmw33xx_device(
     // PMW33xx is only supported on nRF52, STM32 and RP2040
     match chip.series {
         // NOTE: Nonblocking SPI with DMA is still marked unstable in esp_hal.
-        ChipSeries::Nrf52 | ChipSeries::Rp2040 | ChipSeries::Stm32 => {}
+        ChipSeries::Nrf52 | ChipSeries::Nrf54 | ChipSeries::Rp2040 | ChipSeries::Stm32 => {}
         _ => {
             panic!("PMW33xx is only supported on nRF52, STM32, RP2350 and RP2040 chips");
         }
@@ -60,7 +60,7 @@ pub(crate) fn expand_pmw33xx_device(
         let instance_ident = format_ident!("{}", spi.instance);
 
         let rx_dma_ident = match chip.series {
-            ChipSeries::Nrf52 => {
+            ChipSeries::Nrf52 | ChipSeries::Nrf54 => {
                 quote! {}
             }
 
@@ -76,7 +76,7 @@ pub(crate) fn expand_pmw33xx_device(
             _ => unreachable!(),
         };
         let tx_dma_ident = match chip.series {
-            ChipSeries::Nrf52 => {
+            ChipSeries::Nrf52 | ChipSeries::Nrf54 => {
                 quote! {}
             }
 
@@ -131,7 +131,7 @@ pub(crate) fn expand_pmw33xx_device(
         let motion_pin_init = if let Some(motion_pin) = &sensor.motion {
             let motion_ident = format_ident!("{}", motion_pin);
             match chip.series {
-                ChipSeries::Nrf52 => quote! {
+                ChipSeries::Nrf52 | ChipSeries::Nrf54 => quote! {
                     Some(::embassy_nrf::gpio::Input::new(p.#motion_ident, ::embassy_nrf::gpio::Pull::Up))
                 },
                 ChipSeries::Rp2040 => quote! {
@@ -144,7 +144,7 @@ pub(crate) fn expand_pmw33xx_device(
             }
         } else {
             match chip.series {
-                ChipSeries::Nrf52 => quote! {
+                ChipSeries::Nrf52 | ChipSeries::Nrf54 => quote! {
                     None::<::embassy_nrf::gpio::Input<'static>>
                 },
                 ChipSeries::Rp2040 => quote! {
@@ -159,7 +159,7 @@ pub(crate) fn expand_pmw33xx_device(
 
         // Generate device initialization based on chip series
         let device_init = match chip.series {
-            ChipSeries::Nrf52 => quote! {
+            ChipSeries::Nrf52 | ChipSeries::Nrf54 => quote! {
                 let mut #device_ident = {
                     use ::embassy_nrf::spim::{Frequency, Spim, Config, MODE_3};
                     use ::embassy_nrf::gpio::{Output, OutputDrive, Level};

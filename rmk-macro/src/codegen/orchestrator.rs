@@ -179,7 +179,12 @@ pub(crate) fn expand_imports_and_constants(
         },
         _ => {
             // If defmt_log is disabled, add an empty defmt logger impl
-            if hardware.dependency.defmt_log {
+            let features = crate::codegen::feature::get_rmk_features();
+            if crate::codegen::feature::is_feature_enabled(&features, "usb_log")
+                || crate::codegen::feature::is_feature_enabled(&features, "log")
+            {
+                quote! { use panic_probe as _; }
+            } else if hardware.dependency.defmt_log {
                 quote! {
                     use panic_probe as _;
                     use defmt_rtt as _;

@@ -45,6 +45,9 @@ pub(crate) fn expand_flash_init(hardware: &Hardware) -> TokenStream2 {
                     let flash = ::rmk::storage::async_flash_wrapper(::embassy_stm32::flash::Flash::new_blocking(p.FLASH));
                 }
             }
+            ChipSeries::Nrf54 => {
+                panic!("nRF54 YIP example requires storage.enabled = false; RRAM storage is not implemented")
+            }
             ChipSeries::Nrf52 => {
                 #[cfg(feature = "dfu_nrf")]
                 let flash_code = {
@@ -60,8 +63,12 @@ pub(crate) fn expand_flash_init(hardware: &Hardware) -> TokenStream2 {
                     }
                 };
                 #[cfg(not(feature = "dfu_nrf"))]
-                let flash_code = quote! {
-                    let flash = ::nrf_mpsl::Flash::take(mpsl, p.NVMC);
+                let flash_code = if hardware.communication.ble_enabled() {
+                    quote! { let flash = ::nrf_mpsl::Flash::take(mpsl, p.NVMC); }
+                } else {
+                    quote! {
+                        let flash = ::rmk::storage::async_flash_wrapper(::embassy_nrf::nvmc::Nvmc::new(p.NVMC));
+                    }
                 };
                 flash_code
             }

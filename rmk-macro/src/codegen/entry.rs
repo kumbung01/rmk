@@ -211,6 +211,45 @@ pub(crate) fn rmk_entry_select(
                         #joined
                     }
                 }
+                SplitConnection::Esb => {
+                    tasks.push(quote! { ::rmk::split::esb::sleep::run_sleep_manager() });
+                    if !processors.is_empty() {
+                        tasks.push(processors_task);
+                    }
+                    let dfu = is_feature_enabled(&get_rmk_features(), "dfu_split");
+                    let spawns = split_config.peripheral.iter().enumerate().map(|(idx, p)| {
+                        let row = p.rows as u8;
+                        let col = p.cols as u8;
+                        let row_offset = p.row_offset as u8;
+                        let col_offset = p.col_offset as u8;
+                        let policy = if dfu {
+                            if p.update_policy.as_deref() == Some("force") {
+                                quote! { ::rmk::split::central::UpdatePolicy::Force, }
+                            } else {
+                                quote! { ::rmk::split::central::UpdatePolicy::MatchHash, }
+                            }
+                        } else { quote! {} };
+                        quote! {
+                            spawner.spawn(yip_session_task(
+                                #idx,
+                                yip_sessions.next().expect("missing YIP session"),
+                                ::rmk::split::PeripheralMatrixConfig {
+                                    rows: #row, cols: #col, row_offset: #row_offset, col_offset: #col_offset,
+                                },
+                                #policy
+                            ).expect("failed to allocate YIP session task"));
+                        }
+                    });
+                    let joined = join_all_tasks(tasks);
+                    quote! {
+                        let mut yip_sessions = yip_sessions.into_iter();
+                        #(#spawns)*
+                        ::yip::central::start();
+                        #transport_prelude
+                        #auto_mouse_layer_prelude
+                        #joined
+                    }
+                }
             }
         }
         BoardConfig::UniBody(_) => rmk_entry_unibody(

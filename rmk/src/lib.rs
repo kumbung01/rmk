@@ -95,6 +95,8 @@ pub mod display;
 #[cfg(feature = "dongle")]
 pub mod dongle;
 pub mod driver;
+#[cfg(all(feature = "esb", feature = "_ble"))]
+compile_error!("YIP split and BLE cannot own RADIO at the same time");
 pub mod event;
 pub mod helper_macro;
 pub mod hid;

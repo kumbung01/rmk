@@ -4,6 +4,7 @@ use crate::{ChipConfig, KeyboardTomlConfig};
 pub enum ChipSeries {
     Stm32,
     Nrf52,
+    Nrf54,
     #[default]
     Rp2040,
     Esp32,
@@ -38,6 +39,7 @@ impl ChipModel {
 
     fn get_default_config_str_from_chip(&self, chip: &str) -> Result<&'static str, String> {
         match chip {
+            "nrf54lm20" => Ok(include_str!("default_config/nrf54lm20.toml")),
             "nrf52840" => Ok(include_str!("default_config/nrf52840.toml")),
             "nrf52833" => Ok(include_str!("default_config/nrf52833.toml")),
             "nrf52832" => Ok(include_str!("default_config/nrf52832.toml")),
@@ -100,6 +102,12 @@ impl KeyboardTomlConfig {
                     chip,
                     board: None,
                 })
+            } else if chip.eq_ignore_ascii_case("nrf54lm20") {
+                Ok(ChipModel {
+                    series: ChipSeries::Nrf54,
+                    chip: "nrf54lm20".to_string(),
+                    board: None,
+                })
             } else if chip.to_lowercase().starts_with("rp2040") {
                 Ok(ChipModel {
                     series: ChipSeries::Rp2040,
@@ -114,7 +122,7 @@ impl KeyboardTomlConfig {
                 })
             } else {
                 Err(format!(
-                    "Unsupported chip \"{chip}\" — supported chip families are stm32*, nrf52*, rp2040 and esp32*"
+                    "Unsupported chip \"{chip}\" — supported chip families are stm32*, nrf52*, nrf54lm20, rp2040 and esp32*"
                 ))
             }
         } else {

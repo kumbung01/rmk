@@ -50,7 +50,7 @@ fn expand_i2c_interrupt(chip_series: &ChipSeries, i2c: &I2cConfig) -> TokenStrea
                 #irq => ::embassy_rp::i2c::InterruptHandler<::embassy_rp::peripherals::#instance>;
             }
         }
-        ChipSeries::Nrf52 => {
+        ChipSeries::Nrf52 | ChipSeries::Nrf54 => {
             quote! {
                 #instance => ::embassy_nrf::twim::InterruptHandler<::embassy_nrf::peripherals::#instance>;
             }
@@ -89,7 +89,7 @@ fn expand_i2c_init(chip_series: &ChipSeries, i2c: &I2cConfig) -> TokenStream {
                 );
             }
         }
-        ChipSeries::Nrf52 => {
+        ChipSeries::Nrf52 | ChipSeries::Nrf54 => {
             quote! {
                 static DISPLAY_I2C_BUF: ::static_cell::StaticCell<[u8; 256]> = ::static_cell::StaticCell::new();
                 let display_i2c_buf = DISPLAY_I2C_BUF.init([0u8; 256]);

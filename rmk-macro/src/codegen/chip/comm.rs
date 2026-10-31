@@ -61,6 +61,16 @@ pub(crate) fn usb_config_default(hardware: &Hardware) -> TokenStream2 {
                     }
                 }
             }
+            ChipSeries::Nrf54 => quote! {
+                static USB_OUT_BUFFER: ::static_cell::StaticCell<[u8; 2048]> = ::static_cell::StaticCell::new();
+                let driver = ::embassy_nrf::usb::Driver::new(
+                    p.#peripheral_name,
+                    Irqs,
+                    ::embassy_nrf::usb::vbus_detect::HardwareVbusDetect::new(Irqs),
+                    USB_OUT_BUFFER.init([0; 2048]),
+                    ::embassy_nrf::usb::Config::default(),
+                );
+            },
             ChipSeries::Nrf52 => quote! {
                 // use hardware vbus
                 let driver = ::embassy_nrf::usb::Driver::new(p.#peripheral_name, Irqs, ::embassy_nrf::usb::vbus_detect::HardwareVbusDetect::new(Irqs));

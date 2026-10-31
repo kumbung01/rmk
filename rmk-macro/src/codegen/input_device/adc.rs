@@ -11,6 +11,13 @@ pub(crate) fn expand_adc_device(
     chip_model: ChipSeries,
 ) -> (Vec<Initializer>, Vec<Initializer>) {
     match chip_model {
+        ChipSeries::Nrf54 => {
+            assert!(
+                joystick_config.is_empty(),
+                "nRF54 ADC macro initialization is not implemented"
+            );
+            (vec![], vec![])
+        }
         ChipSeries::Nrf52 => {
             let mut channel_cfg = vec![];
             let mut adc_type = vec![];

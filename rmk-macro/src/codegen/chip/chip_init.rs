@@ -55,7 +55,24 @@ pub(crate) fn chip_init_default(hardware: &Hardware, peripheral_id: Option<usize
                 let config = ::embassy_stm32::Config::default();
                 let mut p = ::embassy_stm32::init(config);
         },
+        ChipSeries::Nrf54 => {
+            assert_eq!(chip.chip, "nrf54lm20", "unsupported nRF54 chip");
+            assert!(
+                !communication.ble_enabled(),
+                "nRF54 macro initialization currently supports YIP/USB"
+            );
+            quote! {
+                let mut config = ::embassy_nrf::config::Config::default();
+                config.hfclk_source = ::embassy_nrf::config::HfclkSource::ExternalXtal;
+                config.lfclk_source = ::embassy_nrf::config::LfclkSource::ExternalXtal;
+                let p = ::embassy_nrf::init(config);
+            }
+        }
         ChipSeries::Nrf52 => {
+            let features = get_rmk_features();
+            let info = if is_feature_enabled(&features, "usb_log") || is_feature_enabled(&features, "log") {
+                quote! { ::log::info }
+            } else { quote! { ::defmt::info } };
             let chip_cfg = &hardware.chip_config;
             let dcdc_config = if chip.chip == "nrf52840" {
                 let reg0_enabled = chip_cfg.dcdc_reg0.unwrap_or(true);
@@ -70,13 +87,26 @@ pub(crate) fn chip_init_default(hardware: &Hardware, peripheral_id: Option<usize
                     config.dcdc.reg0_voltage = Some(#reg0_voltage);
                     config.dcdc.reg0 = #reg0_enabled;
                     config.dcdc.reg1 = #reg1_enabled;
-                    ::defmt::info!("DCDC config: reg0_voltage={}, reg0={}, reg1={}", #reg0_voltage_str, #reg0_enabled, #reg1_enabled);
+                    #info!("DCDC config: reg0_voltage={}, reg0={}, reg1={}", #reg0_voltage_str, #reg0_enabled, #reg1_enabled);
                 }
             } else if chip.chip == "nrf52833" {
                 let reg1_enabled = chip_cfg.dcdc_reg1.unwrap_or(true);
                 quote! {
                     config.dcdc.reg1 = #reg1_enabled;
-                    ::defmt::info!("DCDC config: reg1={}", #reg1_enabled);
+                    #info!("DCDC config: reg1={}", #reg1_enabled);
+                }
+            } else {
+                quote! {}
+            };
+            let yip_clocks = if matches!(&hardware.board, BoardConfig::Split(split) if split.connection == rmk_config::SplitConnection::Esb)
+            {
+                assert!(
+                    !communication.ble_enabled(),
+                    "YIP split cannot share RADIO with BLE"
+                );
+                quote! {
+                    config.hfclk_source = ::embassy_nrf::config::HfclkSource::ExternalXtal;
+                    config.lfclk_source = ::embassy_nrf::config::LfclkSource::ExternalXtal;
                 }
             } else {
                 quote! {}
@@ -153,6 +183,7 @@ pub(crate) fn chip_init_default(hardware: &Hardware, peripheral_id: Option<usize
                 use embassy_nrf::interrupt::InterruptExt;
                 let mut config = ::embassy_nrf::config::Config::default();
                 #dcdc_config
+                #yip_clocks
                 let p = ::embassy_nrf::init(config);
                 #ble_init
             }
@@ -242,7 +273,7 @@ fn override_chip_config(chip: &ChipModel, item_fn: &ItemFn) -> TokenStream2 {
         ChipSeries::Stm32 => initialization_tokens.extend(quote! {
             let mut p = ::embassy_stm32::init(config);
         }),
-        ChipSeries::Nrf52 => initialization_tokens.extend(quote! {
+        ChipSeries::Nrf52 | ChipSeries::Nrf54 => initialization_tokens.extend(quote! {
             let mut p = ::embassy_nrf::init(config);
         }),
         ChipSeries::Rp2040 => initialization_tokens.extend(quote! {

@@ -147,7 +147,7 @@ fn create_dfu_led_processor(
             Some(c) if c.pin == "none" => return,
             Some(c) => c.pin.clone(),
             None => match chip.series {
-                ChipSeries::Nrf52 => "P0_15".to_string(),
+                ChipSeries::Nrf52 | ChipSeries::Nrf54 => "P0_15".to_string(),
                 ChipSeries::Rp2040 => "PIN_25".to_string(),
                 _ => return,
             },

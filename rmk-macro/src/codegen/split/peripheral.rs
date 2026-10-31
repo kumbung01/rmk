@@ -87,6 +87,11 @@ pub(crate) fn parse_split_peripheral_mod(
         expand_bind_interrupt_for_split_peripheral(&hardware.chip, &hardware, id, &rmk_features);
 
     let chip = &hardware.chip;
+    let logger_import = if usb_log_enabled || is_feature_enabled(&rmk_features, "log") {
+        quote! {}
+    } else {
+        quote! { use defmt_rtt as _; }
+    };
     let main_function_sig = if chip.series == ChipSeries::Esp32 {
         quote! {
             use esp_alloc as _;
@@ -97,7 +102,7 @@ pub(crate) fn parse_split_peripheral_mod(
         }
     } else {
         quote! {
-            use defmt_rtt as _;
+            #logger_import
             use panic_probe as _;
 
             #bind_interrupts
@@ -151,6 +156,19 @@ fn expand_bind_interrupt_for_split_peripheral(
     let usb_enabled = dfu_enabled || usb_log_enabled;
 
     match chip.series {
+        ChipSeries::Nrf54 => {
+            let usb = usb_enabled.then(|| quote! {
+                USBHS => ::embassy_nrf::usb::InterruptHandler<::embassy_nrf::peripherals::USBHS>;
+                VREGUSB => ::embassy_nrf::usb::vbus_detect::InterruptHandler;
+            });
+            quote! {
+                ::embassy_nrf::bind_interrupts!(struct Irqs {
+                    #usb
+                    #iqs5xx_interrupt
+                    #display_interrupt
+                });
+            }
+        }
         ChipSeries::Nrf52 => {
             let usb_interrupt = if usb_enabled {
                 quote! {
@@ -159,6 +177,31 @@ fn expand_bind_interrupt_for_split_peripheral(
             } else {
                 quote! {}
             };
+
+            if matches!(&hardware.board, BoardConfig::Split(split) if split.connection == SplitConnection::Esb)
+            {
+                let spi = match &hardware.board {
+                    BoardConfig::Split(split) => split.peripheral[peripheral_id].input_device.clone().unwrap_or_default(),
+                    _ => unreachable!(),
+                }.pmw33xx.unwrap_or_default().into_iter().map(|sensor| {
+                    let instance = format_ident!("{}", sensor.spi.instance);
+                    quote! { #instance => ::embassy_nrf::spim::InterruptHandler<::embassy_nrf::peripherals::#instance>; }
+                });
+                let vbus = usb_enabled.then(|| {
+                    quote! {
+                        CLOCK_POWER => ::embassy_nrf::usb::vbus_detect::InterruptHandler;
+                    }
+                });
+                return quote! {
+                    ::embassy_nrf::bind_interrupts!(struct Irqs {
+                        #usb_interrupt
+                        #vbus
+                        #(#spi)*
+                        #iqs5xx_interrupt
+                        #display_interrupt
+                    });
+                };
+            }
 
             let ble_config = communication.get_ble_config().unwrap();
             let support_subrating = if is_feature_enabled(&get_rmk_features(), "subrating") {
@@ -618,6 +661,31 @@ fn expand_split_peripheral_entry(
             quote! {
                 #serial_init
                 #run_rmk_peripheral
+            }
+        }
+        SplitConnection::Esb => {
+            let device = super::central::expand_yip_device(chip, true);
+            let peripheral_id = u8::try_from(id).expect("YIP peripheral id exceeds u8");
+            assert!(id < 7, "YIP peripheral id must be below 7");
+            let mut tasks = vec![device_task];
+            if !processors.is_empty() {
+                tasks.push(processor_task);
+            }
+            tasks.push(quote! { ::rmk::split::esb::run_esb_peripheral(yip_session) });
+            tasks.extend(registered_processors);
+            if let Some(t) = watchdog_task {
+                tasks.push(t);
+            }
+            if let Some(t) = usb_task_future {
+                // Initialize the USB logger before the ESB task emits startup logs.
+                tasks.insert(0, t);
+            }
+            let joined = join_all_tasks(tasks);
+            quote! {
+                #device
+                let yip_session = ::yip::peripheral::init(yip_device, #peripheral_id);
+                ::yip::peripheral::start();
+                #joined
             }
         }
     }

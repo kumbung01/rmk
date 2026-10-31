@@ -178,6 +178,15 @@ fn validate_split_config(split: &SplitConfig, layout: Option<&LayoutTomlConfig>)
                 }
             }
         }
+        SplitConnection::Esb => {
+            // for (board, ctx) in boards() {
+            //     if board.serial.is_some() {
+            //         return Err(format!(
+            //             "keyboard.toml: {ctx} sets `serial`, but split.connection = \"ble\""
+            //         ));
+            //     }
+            // }
+        }
     }
 
     let regions: Vec<_> = boards()

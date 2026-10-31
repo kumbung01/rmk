@@ -1002,6 +1002,7 @@ pub enum SplitConnection {
     #[default]
     Ble,
     Serial,
+    Esb,
 }
 
 /// Configurations for split keyboards

@@ -13,11 +13,13 @@ pub mod ble;
 pub mod central;
 /// Common abstraction layer of split driver
 pub(crate) mod driver;
+#[cfg(not(feature = "_ble"))]
+pub mod serial;
+#[cfg(feature = "esb")]
+pub mod esb;
 pub mod peripheral;
 #[cfg(feature = "rp2040")]
 pub mod rp;
-#[cfg(not(feature = "_ble"))]
-pub mod serial;
 
 /// Maximum size of a split message
 pub const SPLIT_MESSAGE_MAX_SIZE: usize = SplitMessage::POSTCARD_MAX_SIZE + 4;

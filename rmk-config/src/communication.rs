@@ -24,6 +24,7 @@ impl UsbInfo {
     pub fn new_default(chip: &ChipModel) -> Self {
         match chip.series {
             ChipSeries::Stm32 => UsbInfo::new("PA11", "PA12", "USB_OTG_FS", "USB_FS"),
+            ChipSeries::Nrf54 => UsbInfo::new("", "", "USBHS", "USBHS"),
             ChipSeries::Nrf52 => UsbInfo::new("", "", "USBD", "USBD"),
             ChipSeries::Rp2040 => UsbInfo::new("", "", "USB", "USBCTRL_IRQ"),
             _ => UsbInfo::new(

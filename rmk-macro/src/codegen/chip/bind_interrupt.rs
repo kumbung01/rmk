@@ -162,6 +162,20 @@ pub(crate) fn bind_interrupt_default(hardware: &Hardware, item_mod: &ItemMod) ->
                 }
             }
         }
+        rmk_config::resolved::hardware::ChipSeries::Nrf54 => {
+            let usb = communication.usb_enabled().then(|| quote! {
+                USBHS => ::embassy_nrf::usb::InterruptHandler<::embassy_nrf::peripherals::USBHS>;
+                VREGUSB => ::embassy_nrf::usb::vbus_detect::InterruptHandler;
+            });
+            quote! {
+                ::embassy_nrf::bind_interrupts!(struct Irqs {
+                    #usb
+                    #iqs5xx_interrupt
+                    #display_interrupt
+                    #extern_irqs
+                });
+            }
+        }
         rmk_config::resolved::hardware::ChipSeries::Nrf52 => {
             // Usb and clock interrupt
             let usb_and_clock_interrupt = if let Some(usb_info) = communication.get_usb_info() {
@@ -174,6 +188,36 @@ pub(crate) fn bind_interrupt_default(hardware: &Hardware, item_mod: &ItemMod) ->
             } else {
                 quote! { CLOCK_POWER => ::nrf_sdc::mpsl::ClockInterruptHandler; }
             };
+
+            if !communication.ble_enabled() {
+                let usb = communication.get_usb_info().map(|usb| {
+                    let irq = format_ident!("{}", usb.interrupt_name);
+                    let instance = format_ident!("{}", usb.peripheral_name);
+                    quote! {
+                        #irq => ::embassy_nrf::usb::InterruptHandler<::embassy_nrf::peripherals::#instance>;
+                        CLOCK_POWER => ::embassy_nrf::usb::vbus_detect::InterruptHandler;
+                    }
+                });
+                let input = match board {
+                    BoardConfig::Split(split) => {
+                        split.central.input_device.clone().unwrap_or_default()
+                    }
+                    BoardConfig::UniBody(board) => board.input_device.clone(),
+                };
+                let spi = input.pmw33xx.unwrap_or_default().into_iter().map(|sensor| {
+                    let instance = format_ident!("{}", sensor.spi.instance);
+                    quote! { #instance => ::embassy_nrf::spim::InterruptHandler<::embassy_nrf::peripherals::#instance>; }
+                });
+                return quote! {
+                    ::embassy_nrf::bind_interrupts!(struct Irqs {
+                        #usb
+                        #(#spi)*
+                        #iqs5xx_interrupt
+                        #display_interrupt
+                        #extern_irqs
+                    });
+                };
+            }
 
             let ble_config = communication.get_ble_config().unwrap();
             let tx_power = if let Some(pwr) = ble_config.default_tx_power {

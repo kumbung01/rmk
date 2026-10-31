@@ -29,6 +29,104 @@ fn expand_split_communication_config(chip: &ChipModel, split_config: &SplitConfi
                 .expect("central.serial is required");
             expand_serial_init(chip, serial_config)
         }
+        SplitConnection::Esb => {
+            let device = expand_yip_device(chip, false);
+            let links = split_config.peripheral.len();
+            assert!(
+                (1..=7).contains(&links),
+                "YIP split requires 1..=7 peripherals"
+            );
+            let policy_arg = if crate::codegen::feature::is_feature_enabled(
+                &crate::codegen::feature::get_rmk_features(),
+                "dfu_split",
+            ) {
+                quote! { policy: ::rmk::split::central::UpdatePolicy, }
+            } else {
+                quote! {}
+            };
+            let policy = if policy_arg.is_empty() {
+                quote! {}
+            } else {
+                quote! { policy, }
+            };
+            quote! {
+                #device
+                let yip_sessions = ::yip::central::init::<#links>(yip_device);
+                #[::embassy_executor::task(pool_size = #links)]
+                async fn yip_session_task(
+                    id: usize,
+                    session: ::yip::YipSession,
+                    matrix: ::rmk::split::PeripheralMatrixConfig,
+                    #policy_arg
+                ) {
+                    ::rmk::split::esb::run_esb_peripheral_manager(id, session, matrix, #policy).await;
+                }
+            }
+        }
+    }
+}
+
+/// Reserve the radio resources independently of the USB and Embassy time drivers.
+pub(super) fn expand_yip_device(chip: &ChipModel, peripheral: bool) -> TokenStream2 {
+    let role = if peripheral {
+        quote! { peripheral }
+    } else {
+        quote! { central }
+    };
+    if chip.chip == "nrf54lm20" {
+        let calibration = if peripheral {
+            quote! {
+                let calibrated = yip_device.calibrate_clock().await;
+                debug_assert!(calibrated, "GRTC/HF calibration failed");
+            }
+        } else {
+            quote! {}
+        };
+        return quote! {
+            ::embassy_nrf::bind_interrupts!(struct YipIrqs {
+                EGU10 => ::yip::#role::YipInterruptHandler;
+            });
+            let mut yip_device = ::yip::DeviceContext::new(
+                p.RADIO, p.TIMER10, p.GRTC_CH0,
+                ::yip::ppi_channels![
+                    p.PPI10_CH0, p.PPI10_CH1, p.PPI10_CH2, p.PPI10_CH3,
+                    p.PPI10_CH4, p.PPI10_CH5, p.PPI10_CH6, p.PPI10_CH7,
+                    p.PPI10_CH8, p.PPI10_CH9, p.PPI10_CH10,
+                ],
+                ::yip::ppi_channels![p.PPI20_CH0],
+                (p.PPIB21_CH0, p.PPIB11_CH0),
+                [
+                    ::core::convert::Into::into(p.PPI10_GROUP0),
+                    ::core::convert::Into::into(p.PPI10_GROUP1),
+                    ::core::convert::Into::into(p.PPI10_GROUP2),
+                    ::core::convert::Into::into(p.PPI10_GROUP3),
+                ],
+                YipIrqs, 0,
+            );
+            #calibration
+        };
+    }
+    assert_eq!(
+        chip.chip, "nrf52840",
+        "YIP macros support nrf52840 and nrf54lm20"
+    );
+    let completion_group = if peripheral {
+        quote! {}
+    } else {
+        quote! { .with_central_completion_group(p.PPI_GROUP1) }
+    };
+    quote! {
+        ::embassy_nrf::bind_interrupts!(struct YipIrqs {
+            EGU2_SWI2 => ::yip::#role::YipInterruptHandler;
+        });
+        let yip_device = ::yip::DeviceContext::new(
+            p.RADIO, p.TIMER2, p.RTC2,
+            ::yip::ppi_channels![
+                p.PPI_CH0, p.PPI_CH1, p.PPI_CH2, p.PPI_CH3,
+                p.PPI_CH4, p.PPI_CH5, p.PPI_CH6, p.PPI_CH7,
+            ],
+            p.PPI_GROUP0, p.EGU2, YipIrqs, 0,
+        ) #completion_group;
     }
 }
 

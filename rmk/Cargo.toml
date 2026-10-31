@@ -28,6 +28,7 @@ embassy-usb = { version = "0.6", features = [
 embassy-sync = { version = "0.8" }
 embassy-futures = { version = "0.1" }
 embassy-usb-logger = { version = "0.6", optional = true }
+bitfield-struct = "0.13"
 
 futures = { version = "0.3", default-features = false, features = [
     "async-await",
@@ -73,6 +74,8 @@ embassy-nrf = { version = "0.11", features = [
     "unstable-pac",
     "time",
 ], optional = true }
+critical-section = "1"
+yip = { path = "../../yip-rs", optional = true, default-features = false }
 
 # RP2040 dependencies
 embassy-rp = { version = "0.10", optional = true }
@@ -89,7 +92,10 @@ esp-hal = { version = "1.2.0-rc.0", optional = true }
 document-features = "0.2"
 
 # for DFU firmware update
-embassy-usb-dfu = { version = "0.3.0", optional = true, features = ["cortex-m", "dfu"] }
+embassy-usb-dfu = { version = "0.3.0", optional = true, features = [
+    "cortex-m",
+    "dfu",
+] }
 
 [dev-dependencies]
 # A hack for enabling 'std' feature in testing, ref: https://github.com/rust-lang/cargo/issues/2911
@@ -116,6 +122,11 @@ cortex-m = { version = "0.7" }
 
 [features]
 default = ["defmt", "storage", "vial", "host_lock", "watchdog"]
+
+## Enable ESB split transport
+esb-nrf52840 = ["esb", "yip/nrf52840"]
+esb-nrf54lm20 = ["esb", "yip/nrf54lm20", "_usb_high_speed"]
+esb = ["split", "dep:embassy-nrf", "dep:fixed", "dep:yip", "cortex-m/critical-section-single-core"]
 
 ## Enable hardware watchdog support
 watchdog = ["rmk-macro/watchdog"]
@@ -168,6 +179,7 @@ storage = [
 ## Enable defmt support
 defmt = [
     "dep:defmt",
+    "yip?/defmt",
     "rmk-types/defmt",
     "embedded-hal/defmt-03",
     "embedded-hal-async/defmt-03",
@@ -188,23 +200,30 @@ defmt = [
 ## Enable logging via usb
 usb_log = ["dep:embassy-usb-logger", "log"]
 ## Use log, this feature cannot be enabled when defmt is enabled
-log = ["dep:log", "trouble-host?/log"]
+log = ["dep:log", "trouble-host?/log", "yip?/log"]
 
 ## Activate the embassy-time mock driver for deterministic, fast test timing.
 ## (Despite the historic name, this feature does NOT enable embassy-time/std —
 ## it swaps in the manually-advanced mock clock driven by
 ## `rmk::test_support::test_block_on`.)
-std = [
-    "embassy-time/mock-driver",
-    "embassy-time/generic-queue-128",
-]
+std = ["embassy-time/mock-driver", "embassy-time/generic-queue-128"]
 
 ## Enable display support (traits + processor)
 display = ["dep:embedded-graphics", "rmk-types/display"]
 ## Enable SSD1306 OLED driver
-ssd1306 = ["display", "dep:ssd1306", "dep:display-interface", "dep:display-interface-i2c"]
+ssd1306 = [
+    "display",
+    "dep:ssd1306",
+    "dep:display-interface",
+    "dep:display-interface-i2c",
+]
 ## Enable OLED drivers via oled_async (SH1106, SH1107, SH1108, SSD1309)
-oled_async = ["display", "dep:oled_async", "dep:display-interface", "dep:display-interface-i2c"]
+oled_async = [
+    "display",
+    "dep:oled_async",
+    "dep:display-interface",
+    "dep:display-interface-i2c",
+]
 sh1106 = ["oled_async"]
 sh1107 = ["oled_async"]
 sh1108 = ["oled_async"]
@@ -260,7 +279,13 @@ zsa_voyager_bl = []
 ## The flash layout, config, and API can change in any release.
 dfu = ["dep:embassy-usb-dfu", "dep:embassy-embedded-hal", "rmk-types/dfu"]
 ## **Experimental.** Enable RP2040-specific DFU with embassy-boot-rp (implies `dfu` and `rp2040`)
-dfu_rp = ["dfu", "dep:embassy-boot-rp", "dep:embassy-boot", "rp2040", "rmk-macro/dfu_rp"]
+dfu_rp = [
+    "dfu",
+    "dep:embassy-boot-rp",
+    "dep:embassy-boot",
+    "rp2040",
+    "rmk-macro/dfu_rp",
+]
 ## **Experimental.** Enable nRF DFU firmware update support (add a chip feature like `nrf52840` too)
 dfu_nrf = ["dfu", "dep:embassy-boot", "dep:embassy-nrf", "rmk-macro/dfu_nrf"]
 ## **Experimental.** Enable split firmware update support — forward firmware to peripherals over

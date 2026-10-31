@@ -19,6 +19,8 @@ use crate::event::{
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) enum SplitDriverError {
+    #[cfg(feature = "esb")]
+    SendError,
     SerialError,
     EmptyMessage,
     DeserializeError,

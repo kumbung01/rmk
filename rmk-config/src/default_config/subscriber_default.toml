@@ -41,6 +41,18 @@ events = [
     { name = "wpm_update", count = 2 },
 ]
 
+# --- ESB-gated internal subscribers ---
+
+[[subscriber]]
+features = ["esb"]
+events = [
+    # split/esb/sleep.rs: central idle tracking / peripheral local-input wake.
+    { name = "keyboard" },
+    { name = "pointing" },
+    # Peripheral follower receives the central's sleep state.
+    { name = "sleep_state" },
+]
+
 # --- BLE-gated internal subscribers ---
 
 [[subscriber]]

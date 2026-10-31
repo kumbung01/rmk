@@ -19,6 +19,7 @@ pub(crate) fn expand_watchdog_init(hardware: &Hardware) -> (TokenStream2, Option
                 ::embassy_rp::watchdog::Watchdog::new(p.WATCHDOG),
             );
         },
+        ChipSeries::Nrf54 => panic!("nRF54 ADC/watchdog macro initialization is not implemented"),
         ChipSeries::Nrf52 => quote! {
             let mut watchdog_runner =
                 ::rmk::watchdog::Nrf52Watchdog::default_runner(p.WDT);
