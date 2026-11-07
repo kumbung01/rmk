@@ -1,0 +1,45 @@
+[package]
+name = "rmk-custom-split"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+yip = { git = "https://github.com/kumbung01/yip-rs.git", rev = "2edf2e0865b09b32f17af2da64351c324725427d", default-features = false, features = ["nrf52840", "defmt"] }
+rmk = { path = "../../../rmk", default-features = false, features = ["nrf52840", "defmt", "split", "async_matrix"] }
+embassy-nrf = { version = "0.11", features = ["nrf52840", "time-driver-rtc1", "gpiote", "unstable-pac", "time", "defmt"] }
+embassy-executor = { version = "0.10", features = ["platform-cortex-m", "executor-thread", "defmt"] }
+embassy-time = { version = "0.5", features = ["defmt", "defmt-timestamp-uptime"] }
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7.5"
+defmt = "1"
+defmt-rtt = { version = "1", features = ["disable-blocking-mode"] }
+panic-probe = { version = "1", features = ["print-defmt"] }
+static_cell = "2"
+embassy-futures = "0.1"
+postcard = { version = "1", default-features = false }
+
+[[bin]]
+name = "central"
+path = "src/central.rs"
+
+[profile.release]
+opt-level = 2
+lto = "fat"
+codegen-units = 1
+debug = 2
+
+[patch."https://github.com/embassy-rs/embassy.git"]
+embassy-nrf = { version = "0.11.0" }
+embassy-time = { version = "0.5.1" }
+embassy-sync = { version = "0.8.0" }
+embassy-futures = { version = "0.1.2" }
+embassy-executor = { version = "0.10.0" }
+
+[features]
+_ble = ["rmk/_ble"]
+
+[[bin]]
+name = "peripheral"
+path = "src/peripheral.rs"
